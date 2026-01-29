@@ -12,9 +12,7 @@ on:
                 required: false
                 default: prerelease
     push:
-        branches: [master, feature/*, release/*]
-        # tags:
-        #   - v[0-9]+.[0-9]+.[0-9]+
+        branches: [main, feature/*, release/*]
 
 jobs:
     package:
@@ -48,7 +46,7 @@ jobs:
                   RC_NAME=$(echo ${{ github.ref_name }} | sed 's/release\///')
                   echo "FEAT_NAME=" >> $GITHUB_ENV
                   echo "TAG_NAME=$RC_NAME" >> $GITHUB_ENV
-            - if: github.ref_name == 'master'
+            - if: github.ref_name == 'main'
               run: |
                   echo "FEAT_NAME=" >> $GITHUB_ENV
                   echo "TAG_NAME=prerelease" >> $GITHUB_ENV

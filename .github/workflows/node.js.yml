@@ -5,12 +5,12 @@ name: CI
 
 on:
     push:
-        branches: [master, staging]
+        branches: [main, feature/*]
     pull_request:
         # By default, CI will trigger on opened/synchronize/reopened event types.
         # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#pull_request
         # Note: To re-run `lint-commits` after fixing the PR title, close-and-reopen the PR.
-        branches: [master, feature/*, staging]
+        branches: [main, feature/*]
 
 # Cancel old jobs when a pull request is updated.
 concurrency:
@@ -59,7 +59,7 @@ jobs:
 
     lint-duplicate-code:
         needs: lint-commits
-        if: ${{ github.event_name == 'pull_request'}}
+        if: false # TODO: Disabled for amazon-q-vscode for now: ${{ github.event_name == 'pull_request'}}
         runs-on: ubuntu-latest
         strategy:
             matrix:
@@ -147,7 +147,7 @@ jobs:
               env:
                   # Unset NODE_OPTIONS because of https://github.com/codecov/uploader/issues/475
                   NODE_OPTIONS: ''
-              if: ${{ github.repository == 'aws/aws-toolkit-vscode' && github.event_name == 'pull_request' && github.base_ref == 'master' }}
+              if: ${{ github.repository == 'aws/amazon-q-vscode' && github.event_name == 'pull_request' && github.base_ref == 'main' }}
               uses: codecov/codecov-action@v5
               with:
                   flags: macos-${{ matrix.package }}-unittests
@@ -207,7 +207,7 @@ jobs:
               env:
                   # Unset NODE_OPTIONS because of https://github.com/codecov/uploader/issues/475
                   NODE_OPTIONS: ''
-              if: ${{ github.repository == 'aws/aws-toolkit-vscode' && github.event_name == 'pull_request' && github.base_ref == 'master' }}
+              if: ${{ github.repository == 'aws/amazon-q-vscode' && github.event_name == 'pull_request' && github.base_ref == 'main' }}
               uses: codecov/codecov-action@v5
               with:
                   flags: windows-${{ matrix.package }}-unittests
