@@ -1,0 +1,712 @@
+/*!
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * OpenAI-compatible API server that proxies to Amazon Q / CodeWhisperer
+ * streaming API. Ported from kiro-gateway (Python) to TypeScript,
+ * reusing the VS Code extension's existing authentication.
+ */
+
+import * as http from 'http'
+import * as https from 'https'
+import * as vscode from 'vscode'
+import { AuthUtil } from 'aws-core-vscode/codewhisperer'
+import { getLogger } from 'aws-core-vscode/shared'
+import { randomUUID } from 'crypto'
+
+const log = getLogger()
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface OpenAIMessage {
+    role: string
+    content: any
+    tool_calls?: any[]
+    tool_call_id?: string
+}
+
+interface OpenAITool {
+    type: string
+    function?: { name: string; description?: string; parameters?: any }
+}
+
+interface OpenAIChatRequest {
+    model?: string
+    messages: OpenAIMessage[]
+    tools?: OpenAITool[]
+    stream?: boolean
+    max_tokens?: number
+}
+
+// ── Context window limits per model (chars, ~4 chars/token) ──────────────────
+
+const MODEL_CONTEXT_CHARS: Record<string, number> = {
+    'amazon-q':          640_000,   // ~160k tokens
+    'claude-sonnet-4.6': 800_000,   // ~200k tokens
+    'claude-sonnet-4.5': 800_000,
+    'claude-sonnet-4':   800_000,
+    'claude-haiku-4.5':  1_040_000, // ~260k tokens
+}
+const DEFAULT_CONTEXT_CHARS = 640_000
+// Reserve ~20% for the response
+const HISTORY_BUDGET_RATIO = 0.8
+
+// ── Per-conversation context pressure tracker ─────────────────────────────────
+
+interface ConvState {
+    /** Last contextUsagePercentage received from upstream (0-100) */
+    contextUsagePct: number
+    /** Summary injected when context was compressed */
+    summary?: string
+}
+const convStateMap = new Map<string, ConvState>()
+
+// ── History trimming (sliding window) ────────────────────────────────────────
+
+/**
+ * Trims the message list to fit within the model's context budget.
+ * System messages are always kept. Non-system messages are dropped oldest-first
+ * until the total character count fits within the budget.
+ * If a prior conversation was compressed (summary injected), that summary is
+ * prepended as a synthetic system message.
+ */
+function trimMessages(messages: OpenAIMessage[], model: string, convState?: ConvState): OpenAIMessage[] {
+    const budgetChars = Math.floor((MODEL_CONTEXT_CHARS[model] ?? DEFAULT_CONTEXT_CHARS) * HISTORY_BUDGET_RATIO)
+
+    const systemMsgs = messages.filter((m) => m.role === 'system')
+    const nonSystem = messages.filter((m) => m.role !== 'system')
+
+    // If context was previously compressed, inject the summary as a system message
+    const extraSystem: OpenAIMessage[] = convState?.summary
+        ? [{ role: 'system', content: `[Previous conversation summary]\n${convState.summary}` }]
+        : []
+
+    let used = [...systemMsgs, ...extraSystem].reduce((n, m) => n + extractText(m.content).length, 0)
+    const kept: OpenAIMessage[] = []
+
+    // Walk newest → oldest, keep as many as fit.
+    // Use a hard budget cutoff: once we can't fit a message, stop — older messages
+    // are less useful and keeping non-contiguous history breaks the alternating
+    // role invariant that Amazon Q's API requires.
+    for (let i = nonSystem.length - 1; i >= 0; i--) {
+        const len = extractText(nonSystem[i].content).length
+        if (used + len > budgetChars) {
+            log.debug('openaiServer: dropping message %d (role=%s, len=%d) — budget exhausted', i, nonSystem[i].role, len)
+            break
+        }
+        kept.unshift(nonSystem[i])
+        used += len
+    }
+
+    // Ensure the kept slice starts with a 'user' message.
+    // Trimming can leave an orphaned 'tool' result or 'assistant' message at the
+    // front (its paired assistant tool_call was dropped), which Amazon Q rejects.
+    while (kept.length && kept[0].role !== 'user') {
+        log.debug('openaiServer: dropping leading %s message to restore user-first invariant', kept[0].role)
+        kept.shift()
+    }
+    // Also drop any leading 'tool' messages (role==='tool') — they must follow an assistant tool_call
+    while (kept.length && kept[0].role === 'tool') {
+        log.debug('openaiServer: dropping leading tool-result message (no preceding tool_call)')
+        kept.shift()
+    }
+
+    const dropped = nonSystem.length - kept.length
+    if (dropped > 0) {
+        log.warn('openaiServer: trimmed %d messages to fit %d-char budget (model=%s)', dropped, budgetChars, model)
+    }
+
+    return [...systemMsgs, ...extraSystem, ...kept]
+}
+
+// ── Session key (stable ID for a logical conversation) ───────────────────────
+
+function buildSessionKey(messages: OpenAIMessage[]): string {
+    const system = messages.find((m) => m.role === 'system')
+    const firstUser = messages.find((m) => m.role === 'user')
+    const raw = extractText(system?.content ?? '') + '|' + extractText(firstUser?.content ?? '').slice(0, 200)
+    // Simple djb2 hash — no crypto needed, just needs to be stable
+    let h = 5381
+    for (let i = 0; i < raw.length; i++) h = ((h << 5) + h) ^ raw.charCodeAt(i)
+    return (h >>> 0).toString(16)
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function extractText(content: any): string {
+    if (!content) return ''
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+        return content
+            .filter((b: any) => b.type === 'text' || b.text)
+            .map((b: any) => b.text ?? '')
+            .join('')
+    }
+    return String(content)
+}
+
+function sanitizeSchema(schema: any): any {
+    if (!schema || typeof schema !== 'object') return schema
+    const out: any = {}
+    for (const [k, v] of Object.entries(schema)) {
+        if (k === 'additionalProperties') continue
+        if (k === 'required' && Array.isArray(v) && v.length === 0) continue
+        if (k === 'properties' && typeof v === 'object' && v !== null) {
+            out[k] = Object.fromEntries(
+                Object.entries(v).map(([pk, pv]) => [pk, sanitizeSchema(pv)])
+            )
+        } else if (Array.isArray(v)) {
+            out[k] = v.map((i: any) => (typeof i === 'object' ? sanitizeSchema(i) : i))
+        } else if (typeof v === 'object' && v !== null) {
+            out[k] = sanitizeSchema(v)
+        } else {
+            out[k] = v
+        }
+    }
+    return out
+}
+
+// ── Payload builder (OpenAI → Kiro/CW format) ───────────────────────────────
+
+function buildKiroPayload(req: OpenAIChatRequest, conversationId: string, profileArn?: string) {
+    let systemPrompt = ''
+    const unified: { role: string; content: string; toolCalls?: any[]; toolResults?: any[] }[] = []
+    const pendingToolResults: any[] = []
+
+    for (const m of req.messages) {
+        if (m.role === 'system') {
+            systemPrompt += extractText(m.content) + '\n'
+            continue
+        }
+        if (m.role === 'tool') {
+            pendingToolResults.push({
+                content: [{ text: extractText(m.content) || '(empty result)' }],
+                status: 'success',
+                toolUseId: m.tool_call_id ?? '',
+            })
+            continue
+        }
+        if (pendingToolResults.length) {
+            unified.push({ role: 'user', content: '', toolResults: [...pendingToolResults] })
+            pendingToolResults.length = 0
+        }
+        const entry: (typeof unified)[0] = { role: m.role, content: extractText(m.content) }
+        if (m.role === 'assistant' && m.tool_calls?.length) {
+            entry.toolCalls = m.tool_calls.map((tc: any) => ({
+                name: tc.function?.name ?? '',
+                input: JSON.parse(tc.function?.arguments ?? '{}'),
+                toolUseId: tc.id ?? '',
+            }))
+        }
+        unified.push(entry)
+    }
+    if (pendingToolResults.length) {
+        unified.push({ role: 'user', content: '', toolResults: [...pendingToolResults] })
+    }
+
+    systemPrompt = systemPrompt.trim()
+
+    // Merge adjacent same-role messages
+    const merged: typeof unified = []
+    for (const m of unified) {
+        const last = merged[merged.length - 1]
+        if (last && last.role === m.role) {
+            last.content = (last.content + '\n' + m.content).trim()
+            if (m.toolCalls) last.toolCalls = [...(last.toolCalls ?? []), ...m.toolCalls]
+            if (m.toolResults) last.toolResults = [...(last.toolResults ?? []), ...m.toolResults]
+        } else {
+            merged.push({ ...m })
+        }
+    }
+
+    // Ensure first message is user
+    if (merged.length && merged[0].role !== 'user') {
+        merged.unshift({ role: 'user', content: '(empty)' })
+    }
+
+    // Ensure alternating roles
+    const alternated: typeof merged = [merged[0]]
+    for (let i = 1; i < merged.length; i++) {
+        if (merged[i].role === alternated[alternated.length - 1].role) {
+            alternated.push({ role: merged[i].role === 'user' ? 'assistant' : 'user', content: '(empty)' })
+        }
+        alternated.push(merged[i])
+    }
+
+    const modelId = req.model ?? 'claude-sonnet-4.5'
+    const historyMsgs = alternated.length > 1 ? alternated.slice(0, -1) : []
+    const current = alternated[alternated.length - 1]
+
+    // Prepend system prompt to first user message in history (or current if no history)
+    if (systemPrompt) {
+        if (historyMsgs.length && historyMsgs[0].role === 'user') {
+            historyMsgs[0].content = systemPrompt + '\n\n' + historyMsgs[0].content
+        } else {
+            current.content = systemPrompt + '\n\n' + current.content
+        }
+    }
+
+    // Build history array
+    const history: any[] = historyMsgs.map((m) => {
+        if (m.role === 'user') {
+            const ui: any = { content: m.content || '(empty)', modelId, origin: 'AI_EDITOR' }
+            if (m.toolResults?.length) {
+                ui.userInputMessageContext = { toolResults: m.toolResults }
+            }
+            return { userInputMessage: ui }
+        }
+        const ar: any = { content: m.content || '(empty)' }
+        if (m.toolCalls?.length) ar.toolUses = m.toolCalls
+        return { assistantResponseMessage: ar }
+    })
+
+    // Current message
+    let currentContent = current.content || '(empty)'
+    if (current.role === 'assistant') {
+        history.push({ assistantResponseMessage: { content: currentContent } })
+        currentContent = 'Continue'
+    }
+
+    const userInput: any = { content: currentContent, modelId, origin: 'AI_EDITOR' }
+    const ctx: any = {}
+
+    // Tools
+    if (req.tools?.length) {
+        ctx.tools = req.tools
+            .filter((t) => t.type === 'function' && t.function)
+            .map((t) => ({
+                toolSpecification: {
+                    name: t.function!.name,
+                    description: t.function!.description || `Tool: ${t.function!.name}`,
+                    inputSchema: { json: sanitizeSchema(t.function!.parameters ?? {}) },
+                },
+            }))
+    }
+
+    // Tool results on current message
+    if (current.toolResults?.length) {
+        ctx.toolResults = current.toolResults
+    }
+
+    if (Object.keys(ctx).length) userInput.userInputMessageContext = ctx
+
+    const payload: any = {
+        conversationState: {
+            chatTriggerType: 'MANUAL',
+            conversationId,
+            currentMessage: { userInputMessage: userInput },
+        },
+    }
+    if (history.length) payload.conversationState.history = history
+    if (profileArn) payload.profileArn = profileArn
+
+    return payload
+}
+
+// ── AWS SSE stream parser ────────────────────────────────────────────────────
+
+interface ParsedEvent {
+    type: 'content' | 'tool_start' | 'tool_input' | 'tool_stop' | 'usage' | 'context_usage'
+    data: any
+}
+
+function findMatchingBrace(text: string, start: number): number {
+    if (start >= text.length || text[start] !== '{') return -1
+    let depth = 0
+    let inStr = false
+    let esc = false
+    for (let i = start; i < text.length; i++) {
+        const c = text[i]
+        if (esc) { esc = false; continue }
+        if (c === '\\' && inStr) { esc = true; continue }
+        if (c === '"') { inStr = !inStr; continue }
+        if (!inStr) {
+            if (c === '{') depth++
+            else if (c === '}' && --depth === 0) return i
+        }
+    }
+    return -1
+}
+
+const EVENT_PATTERNS: [string, ParsedEvent['type']][] = [
+    ['{"content":', 'content'],
+    ['{"name":', 'tool_start'],
+    ['{"input":', 'tool_input'],
+    ['{"stop":', 'tool_stop'],
+    ['{"usage":', 'usage'],
+    ['{"contextUsagePercentage":', 'context_usage'],
+]
+
+function parseChunk(buffer: { value: string }): ParsedEvent[] {
+    const events: ParsedEvent[] = []
+    while (true) {
+        let earliest = -1
+        let eType: ParsedEvent['type'] | undefined
+        for (const [pat, t] of EVENT_PATTERNS) {
+            const pos = buffer.value.indexOf(pat)
+            if (pos !== -1 && (earliest === -1 || pos < earliest)) {
+                earliest = pos
+                eType = t
+            }
+        }
+        if (earliest === -1 || !eType) break
+        const end = findMatchingBrace(buffer.value, earliest)
+        if (end === -1) break
+        const json = buffer.value.slice(earliest, end + 1)
+        buffer.value = buffer.value.slice(end + 1)
+        try {
+            const data = JSON.parse(json)
+            events.push({ type: eType, data })
+        } catch { /* skip malformed */ }
+    }
+    return events
+}
+
+// ── HTTP request to CodeWhisperer API ────────────────────────────────────────
+
+function postStream(url: string, body: string, headers: Record<string, string>): Promise<http.IncomingMessage> {
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url)
+        const opts: https.RequestOptions = {
+            hostname: parsed.hostname,
+            port: parsed.port || 443,
+            path: parsed.pathname,
+            method: 'POST',
+            headers: { ...headers, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        }
+        const req = https.request(opts, (res) => resolve(res))
+        req.on('error', reject)
+        req.write(body)
+        req.end()
+    })
+}
+
+async function streamFromCW(payload: any): Promise<http.IncomingMessage> {
+    const token = await AuthUtil.instance.getBearerToken()
+    const clientConfig = AuthUtil.instance.regionProfileManager.clientConfig as { endpoint: string; region: string }
+    const url = `${clientConfig.endpoint}/generateAssistantResponse`
+    const headers: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+        'x-amzn-codewhisperer-optout': 'false',
+    }
+    return postStream(url, JSON.stringify(payload), headers)
+}
+
+// ── Request handler ──────────────────────────────────────────────────────────
+
+async function handleChatCompletions(req: OpenAIChatRequest, res: http.ServerResponse) {
+    const model = req.model ?? 'amazon-q'
+
+    // ── Context compression: if prior conversation hit ≥90%, start fresh ──────
+    // We key by a stable hash of the system prompt + first user message so the
+    // same logical "session" reuses its state across stateless HTTP calls.
+    const sessionKey = buildSessionKey(req.messages)
+    const prevState = convStateMap.get(sessionKey)
+    if (prevState?.contextUsagePct !== undefined && prevState.contextUsagePct >= 90) {
+        log.warn('openaiServer: context at %d%% — compressing history for session %s', prevState.contextUsagePct, sessionKey)
+        // Build a summary from the last assistant message as a best-effort proxy
+        const lastAssistant = [...req.messages].reverse().find((m) => m.role === 'assistant')
+        prevState.summary = lastAssistant
+            ? `Last assistant response: ${extractText(lastAssistant.content).slice(0, 2000)}`
+            : 'Context was compressed due to length.'
+        prevState.contextUsagePct = 0
+    }
+
+    // ── Trim history to fit within model context budget ───────────────────────
+    req = { ...req, messages: trimMessages(req.messages, model, prevState) }
+
+    const conversationId = randomUUID()
+    const requestId = `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`
+    const created = Math.floor(Date.now() / 1000)
+
+    let profileArn: string | undefined
+    try {
+        profileArn = AuthUtil.instance.regionProfileManager?.activeRegionProfile?.arn
+    } catch { /* optional */ }
+
+    const payload = buildKiroPayload(req, conversationId, profileArn)
+
+    // Forward max_tokens if provided
+    if (req.max_tokens) {
+        payload.conversationState.currentMessage.userInputMessage.maxTokens = req.max_tokens
+    }
+
+    let upstream: http.IncomingMessage
+    try {
+        upstream = await streamFromCW(payload)
+    } catch (err: any) {
+        log.error('CW API request failed: %s', err)
+        res.writeHead(502, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: `Upstream error: ${err.message}` } }))
+        return
+    }
+
+    if (upstream.statusCode !== 200) {
+        const chunks: Buffer[] = []
+        for await (const c of upstream) chunks.push(c as Buffer)
+        const body = Buffer.concat(chunks).toString()
+        log.error('CW API returned %d: %s', upstream.statusCode, body)
+        res.writeHead(upstream.statusCode ?? 502, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: `Upstream ${upstream.statusCode}: ${body}` } }))
+        return
+    }
+
+    const buffer = { value: '' }
+    const toolCalls: any[] = []
+    let currentTool: any = null
+    let lastContent: string | null = null
+    // Token counts from upstream usage event
+    let promptTokens = 0
+    let completionTokens = 0
+
+    // Helper: handle usage + context_usage events (shared by both paths)
+    const handleMetaEvent = (ev: ParsedEvent) => {
+        if (ev.type === 'usage') {
+            // Amazon Q may return inputTokens / outputTokens or inputTokenCount / outputTokenCount
+            promptTokens = ev.data.inputTokens ?? ev.data.inputTokenCount ?? promptTokens
+            completionTokens = ev.data.outputTokens ?? ev.data.outputTokenCount ?? completionTokens
+        } else if (ev.type === 'context_usage') {
+            const pct: number = ev.data.contextUsagePercentage ?? 0
+            log.debug('openaiServer: contextUsagePercentage=%d%% session=%s', pct, sessionKey)
+            // Persist so next request can react
+            const state = convStateMap.get(sessionKey) ?? { contextUsagePct: 0 }
+            state.contextUsagePct = pct
+            convStateMap.set(sessionKey, state)
+            if (pct >= 75) {
+                log.warn('openaiServer: context pressure %d%% — approaching limit (session=%s)', pct, sessionKey)
+            }
+        }
+    }
+
+    if (req.stream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
+        let first = true
+
+        const sendChunk = (delta: any, finishReason: string | null, usage?: any) => {
+            const chunk: any = { id: requestId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: finishReason }] }
+            if (usage) chunk.usage = usage
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+        }
+
+        for await (const raw of upstream) {
+            buffer.value += (raw as Buffer).toString('utf-8')
+            for (const ev of parseChunk(buffer)) {
+                if (ev.type === 'content') {
+                    const text = ev.data.content ?? ''
+                    if (text === lastContent) continue
+                    lastContent = text
+                    const delta: any = { content: text }
+                    if (first) { delta.role = 'assistant'; first = false }
+                    sendChunk(delta, null)
+                } else if (ev.type === 'tool_start') {
+                    if (currentTool) toolCalls.push(currentTool)
+                    currentTool = {
+                        id: ev.data.toolUseId ?? `call_${randomUUID().slice(0, 8)}`,
+                        type: 'function',
+                        function: { name: ev.data.name ?? '', arguments: typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? '') },
+                    }
+                    if (ev.data.stop) { toolCalls.push(currentTool); currentTool = null }
+                } else if (ev.type === 'tool_input' && currentTool) {
+                    const inp = typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? '')
+                    currentTool.function.arguments += inp
+                } else if (ev.type === 'tool_stop' && currentTool) {
+                    try { currentTool.function.arguments = JSON.stringify(JSON.parse(currentTool.function.arguments)) } catch { /* keep raw */ }
+                    toolCalls.push(currentTool)
+                    currentTool = null
+                } else {
+                    handleMetaEvent(ev)
+                }
+            }
+        }
+        if (currentTool) {
+            try { currentTool.function.arguments = JSON.stringify(JSON.parse(currentTool.function.arguments)) } catch {}
+            toolCalls.push(currentTool)
+        }
+
+        if (toolCalls.length) {
+            sendChunk({ tool_calls: toolCalls.map((tc, i) => ({ index: i, ...tc })) }, null)
+        }
+
+        // Final chunk carries usage so clients (Cline) can track token budget
+        const finalUsage = { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens }
+        sendChunk({}, toolCalls.length ? 'tool_calls' : 'stop', finalUsage)
+        res.write('data: [DONE]\n\n')
+        res.end()
+    } else {
+        // Non-streaming: collect full response
+        let fullContent = ''
+        for await (const raw of upstream) {
+            buffer.value += (raw as Buffer).toString('utf-8')
+            for (const ev of parseChunk(buffer)) {
+                if (ev.type === 'content') {
+                    const text = ev.data.content ?? ''
+                    if (text !== lastContent) { fullContent += text; lastContent = text }
+                } else if (ev.type === 'tool_start') {
+                    if (currentTool) toolCalls.push(currentTool)
+                    currentTool = { id: ev.data.toolUseId ?? `call_${randomUUID().slice(0, 8)}`, type: 'function', function: { name: ev.data.name ?? '', arguments: typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? '') } }
+                    if (ev.data.stop) { toolCalls.push(currentTool); currentTool = null }
+                } else if (ev.type === 'tool_input' && currentTool) {
+                    currentTool.function.arguments += typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? '')
+                } else if (ev.type === 'tool_stop' && currentTool) {
+                    try { currentTool.function.arguments = JSON.stringify(JSON.parse(currentTool.function.arguments)) } catch {}
+                    toolCalls.push(currentTool); currentTool = null
+                } else {
+                    handleMetaEvent(ev)
+                }
+            }
+        }
+        if (currentTool) {
+            try { currentTool.function.arguments = JSON.stringify(JSON.parse(currentTool.function.arguments)) } catch {}
+            toolCalls.push(currentTool)
+        }
+
+        const message: any = { role: 'assistant', content: fullContent }
+        if (toolCalls.length) message.tool_calls = toolCalls
+        const finishReason = toolCalls.length ? 'tool_calls' : 'stop'
+
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+            id: requestId, object: 'chat.completion', created, model,
+            choices: [{ index: 0, message, finish_reason: finishReason }],
+            usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
+        }))
+    }
+}
+
+// Token-based context window sizes (chars / 4 ≈ tokens)
+const MODEL_CONTEXT_TOKENS: Record<string, number> = {
+    'amazon-q':          160_000,
+    'claude-sonnet-4.6': 200_000,
+    'claude-sonnet-4.5': 200_000,
+    'claude-sonnet-4':   200_000,
+    'claude-haiku-4.5':  260_000,
+}
+
+function handleModels(res: http.ServerResponse) {
+    const created = Math.floor(Date.now() / 1000)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+        object: 'list',
+        data: Object.entries(MODEL_CONTEXT_TOKENS).map(([id, ctx]) => ({
+            id,
+            object: 'model',
+            created,
+            owned_by: 'amazon',
+            context_length: ctx,
+            context_window: ctx,
+        })),
+    }))
+}
+
+function readBody(req: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = []
+        req.on('data', (c: Buffer) => chunks.push(c))
+        req.on('end', () => resolve(Buffer.concat(chunks).toString()))
+        req.on('error', reject)
+    })
+}
+
+// ── Server ───────────────────────────────────────────────────────────────────
+
+export class OpenAICompatServer {
+    private server: http.Server | undefined
+    private _port: number
+
+    constructor(port = 61822) { this._port = port }
+    get port() { return this._port }
+    get isRunning() { return !!this.server }
+
+    async start(): Promise<void> {
+        if (this.server) return
+
+        this.server = http.createServer(async (req, res) => {
+            res.setHeader('Access-Control-Allow-Origin', '*')
+            res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+            if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
+
+            const url = req.url ?? ''
+
+            if (url === '/v1/models' && req.method === 'GET') return handleModels(res)
+
+            if (url === '/v1/chat/completions' && req.method === 'POST') {
+                if (!AuthUtil.instance.isConnected()) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ error: { message: 'Not authenticated with Amazon Q' } }))
+                    return
+                }
+                const body = await readBody(req)
+                let parsed: OpenAIChatRequest
+                try { parsed = JSON.parse(body) } catch {
+                    res.writeHead(400, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ error: { message: 'Invalid JSON' } }))
+                    return
+                }
+                if (!parsed.messages?.length) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ error: { message: 'messages required' } }))
+                    return
+                }
+                try {
+                    await handleChatCompletions(parsed, res)
+                } catch (err: any) {
+                    log.error('handleChatCompletions error: %s', err)
+                    if (!res.headersSent) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' })
+                        res.end(JSON.stringify({ error: { message: err.message ?? 'Internal error' } }))
+                    }
+                }
+                return
+            }
+
+            res.writeHead(404, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: { message: 'Not found' } }))
+        })
+
+        return new Promise((resolve, reject) => {
+            this.server!.listen(this._port, '127.0.0.1', () => {
+                log.info('OpenAI-compatible server listening on http://127.0.0.1:%d', this._port)
+                resolve()
+            })
+            this.server!.on('error', (err) => { this.server = undefined; reject(err) })
+        })
+    }
+
+    stop(): Promise<void> {
+        return new Promise((resolve) => {
+            if (!this.server) { resolve(); return }
+            this.server.close(() => { this.server = undefined; log.info('OpenAI-compatible server stopped'); resolve() })
+        })
+    }
+}
+
+// ── Activation ───────────────────────────────────────────────────────────────
+
+let serverInstance: OpenAICompatServer | undefined
+
+export function activateOpenAIServer(context: vscode.ExtensionContext) {
+    const config = vscode.workspace.getConfiguration('amazonQ')
+    const port = config.get<number>('openAICompatServer.port', 61822)
+    const autoStart = config.get<boolean>('openAICompatServer.autoStart', true)
+
+    serverInstance = new OpenAICompatServer(port)
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('aws.amazonq.openaiServer.start', async () => {
+            try {
+                await serverInstance!.start()
+                void vscode.window.showInformationMessage(`Amazon Q OpenAI-compatible server on http://127.0.0.1:${serverInstance!.port}`)
+            } catch (err: any) { void vscode.window.showErrorMessage(`Failed to start: ${err.message}`) }
+        }),
+        vscode.commands.registerCommand('aws.amazonq.openaiServer.stop', async () => {
+            await serverInstance!.stop()
+            void vscode.window.showInformationMessage('Amazon Q OpenAI-compatible server stopped')
+        }),
+        { dispose: () => serverInstance?.stop() }
+    )
+
+    if (autoStart) {
+        serverInstance.start().catch((err) => log.error('Auto-start failed: %s', err))
+    }
+}
