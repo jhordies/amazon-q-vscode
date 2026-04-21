@@ -9,7 +9,7 @@
 
 const path = require('path')
 const webpack = require('webpack')
-const { ESBuildMinifyPlugin } = require('esbuild-loader')
+// const { ESBuildMinifyPlugin } = require('esbuild-loader')
 const fs = require('fs')
 const { NLSBundlePlugin } = require('vscode-nls-dev/lib/webpack-bundler')
 const CircularDependencyPlugin = require('circular-dependency-plugin')
@@ -83,10 +83,15 @@ module.exports = (env = {}, argv = {}) => {
                         // },
                         {
                             // This transpiles our typescript to javascript.
-                            loader: 'esbuild-loader',
+                            loader: 'ts-loader',
                             options: {
-                                loader: 'ts',
-                                target: 'es2021',
+                                transpileOnly: true,
+                                compilerOptions: {
+                                    rootDir: undefined,
+                                    composite: false,
+                                    declaration: false,
+                                    declarationMap: false,
+                                },
                             },
                         },
                     ],
@@ -112,19 +117,7 @@ module.exports = (env = {}, argv = {}) => {
             }),
         ],
         optimization: {
-            minimize: !isDevelopment,
-            minimizer: [
-                new ESBuildMinifyPlugin({
-                    target: 'es2021',
-                    // Are these enabled by default?
-                    // minify: true,
-                    // treeShaking: true,
-
-                    // De-duplicate license headers and list them at end of file.
-                    legalComments: 'eof',
-                    // sourcemap: 'external',
-                }),
-            ],
+            minimize: false,
         },
     }
     return baseConfig
