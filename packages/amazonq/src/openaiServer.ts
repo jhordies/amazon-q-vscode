@@ -499,16 +499,29 @@ async function handleChatCompletions(req: OpenAIChatRequest, res: http.ServerRes
                     if (first) { delta.role = 'assistant'; first = false }
                     sendChunk(delta, null)
                 } else if (ev.type === 'tool_start') {
+                    // Finalize any previous tool
                     if (currentTool) toolCalls.push(currentTool)
-                    currentTool = {
-                        id: ev.data.toolUseId ?? `call_${randomUUID().slice(0, 8)}`,
-                        type: 'function',
-                        function: { name: ev.data.name ?? '', arguments: typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? '') },
+                    const toolId = ev.data.toolUseId ?? `call_${randomUUID().slice(0, 8)}`
+                    const initialArgs = typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? '')
+                    currentTool = { id: toolId, type: 'function', function: { name: ev.data.name ?? '', arguments: initialArgs }, _index: toolCalls.length }
+                    // Stream: header chunk with id, type, function.name, empty arguments
+                    if (first) { sendChunk({ role: 'assistant', content: null }, null); first = false }
+                    sendChunk({
+                        tool_calls: [{ index: currentTool._index, id: toolId, type: 'function', function: { name: ev.data.name ?? '', arguments: '' } }]
+                    }, null)
+                    // If initial input already present, stream it
+                    if (initialArgs) {
+                        sendChunk({ tool_calls: [{ index: currentTool._index, function: { arguments: initialArgs } }] }, null)
+                        currentTool.function.arguments = initialArgs
                     }
                     if (ev.data.stop) { toolCalls.push(currentTool); currentTool = null }
                 } else if (ev.type === 'tool_input' && currentTool) {
                     const inp = typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? '')
-                    currentTool.function.arguments += inp
+                    if (inp) {
+                        currentTool.function.arguments += inp
+                        // Stream arguments fragment
+                        sendChunk({ tool_calls: [{ index: currentTool._index, function: { arguments: inp } }] }, null)
+                    }
                 } else if (ev.type === 'tool_stop' && currentTool) {
                     try { currentTool.function.arguments = JSON.stringify(JSON.parse(currentTool.function.arguments)) } catch { /* keep raw */ }
                     toolCalls.push(currentTool)
@@ -521,10 +534,6 @@ async function handleChatCompletions(req: OpenAIChatRequest, res: http.ServerRes
         if (currentTool) {
             try { currentTool.function.arguments = JSON.stringify(JSON.parse(currentTool.function.arguments)) } catch {}
             toolCalls.push(currentTool)
-        }
-
-        if (toolCalls.length) {
-            sendChunk({ tool_calls: toolCalls.map((tc, i) => ({ index: i, ...tc })) }, null)
         }
 
         // Final chunk carries usage so clients (Cline) can track token budget
