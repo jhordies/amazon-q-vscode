@@ -234,6 +234,83 @@ for result in client.messages.batches.results(batch.id):
 | `document` | Text content extracted; base64 replaced with `[document]` |
 | `thinking` / `redacted_thinking` | Skipped (internal to model) |
 
+## Local development
+
+The production webpack build uses esbuild for minification, which may be blocked by group policy on some machines. Use the dev build + manual VSIX packaging workflow instead.
+
+### Fastest local test loop
+
+**1. Build the Node bundle (dev mode, ~20–35 s):**
+
+```bash
+cd packages/amazonq
+node ../../node_modules/webpack/bin/webpack.js \
+  --config webpack.node.config.js \
+  --mode development
+```
+
+**2. Temporarily disable the prepublish script** so `vsce` doesn't re-run the production build:
+
+In `packages/amazonq/package.json`, rename the key:
+```json
+"vscode:prepublish_disabled": "npm run clean && ..."
+```
+
+**3. Create a stub web bundle** (required by vsce, not used at runtime):
+
+```bash
+mkdir -p packages/amazonq/dist/src
+echo "// stub" > packages/amazonq/dist/src/extensionWeb.js
+```
+
+**4. Package the VSIX:**
+
+```bash
+cd packages/amazonq
+node ../../node_modules/@vscode/vsce/vsce package \
+  --no-dependencies \
+  --allow-missing-repository \
+  --ignoreFile ../.vscodeignore.packages \
+  -o amazon-q-openai.vsix \
+  --no-git-tag-version
+```
+
+**5. Restore the prepublish script** (revert the rename in step 2).
+
+**6. Install and reload:**
+
+```bash
+code --install-extension packages/amazonq/amazon-q-openai.vsix --force
+# Then: Ctrl+Shift+P → "Developer: Reload Window"
+```
+
+**7. Smoke-test the server:**
+
+```bash
+# Server health
+curl http://127.0.0.1:61823/v1/models
+
+# Non-streaming message
+curl -s -X POST http://127.0.0.1:61823/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4.5","max_tokens":50,"messages":[{"role":"user","content":"Say hi"}]}'
+
+# Batch (create → poll → results)
+BATCH=$(curl -s -X POST http://127.0.0.1:61823/v1/messages/batches \
+  -H "Content-Type: application/json" \
+  -d '{"requests":[{"custom_id":"r1","params":{"model":"claude-sonnet-4.5","max_tokens":30,"messages":[{"role":"user","content":"hi"}]}}]}')
+echo $BATCH
+ID=$(echo $BATCH | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
+curl -s http://127.0.0.1:61823/v1/messages/batches/$ID
+curl -s http://127.0.0.1:61823/v1/messages/batches/$ID/results
+```
+
+### Notes
+
+- The `dist/` folder, `amazon-q-openai.vsix`, and `tsconfig.tsbuildinfo` are gitignored — safe to generate locally.
+- The stub `extensionWeb.js` is only needed to satisfy `vsce`'s entrypoint check; it is never loaded at runtime.
+- After a `git pull` that changes `anthropicServer.ts` or `serverUtils.ts`, repeat steps 1–6 to pick up the changes.
+
 ## Limitations
 
 - **Token counting** (`/v1/messages/count_tokens`) is a best-effort estimate (~4 chars/token). It does not call the upstream API.
