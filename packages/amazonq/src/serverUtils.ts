@@ -38,27 +38,19 @@ export interface OpenAIChatRequest {
     max_tokens?: number
 }
 
-// ── Context window limits per model (chars, ~4 chars/token) ──────────────────
+// ── Dynamic model context cache ───────────────────────────────────────────────
+//
+// Populated by fetchModelList() from the live listAvailableModels API.
+// Keys are modelId strings; values are context window sizes in chars (~4 chars/token).
+// No hardcoded model list — everything comes from the API at runtime.
 
-export const MODEL_CONTEXT_CHARS: Record<string, number> = {
-    'amazon-q':          640_000,   // ~160k tokens
-    'claude-sonnet-4.6': 800_000,   // ~200k tokens
-    'claude-sonnet-4.5': 800_000,
-    'claude-sonnet-4':   800_000,
-    'claude-haiku-4.5':  1_040_000, // ~260k tokens
-}
+/** Runtime cache: modelId → context window in chars. Populated by fetchModelList(). */
+export const modelContextCharsCache = new Map<string, number>()
+
+/** Safe default when a model's context size is not yet known (160k tokens × 4 chars). */
 export const DEFAULT_CONTEXT_CHARS = 640_000
-// Reserve ~20% for the response
+/** Reserve ~20% of the context window for the model's response. */
 export const HISTORY_BUDGET_RATIO = 0.8
-
-// Token-based context window sizes (chars / 4 ≈ tokens)
-export const MODEL_CONTEXT_TOKENS: Record<string, number> = {
-    'amazon-q':          160_000,
-    'claude-sonnet-4.6': 200_000,
-    'claude-sonnet-4.5': 200_000,
-    'claude-sonnet-4':   200_000,
-    'claude-haiku-4.5':  260_000,
-}
 
 // ── Per-conversation context pressure tracker ─────────────────────────────────
 
@@ -131,7 +123,9 @@ export const convStateMap = new Map<string, ConvState>()
  * until the total character count fits within the budget.
  */
 export function trimMessages(messages: OpenAIMessage[], model: string, convState?: ConvState): OpenAIMessage[] {
-    const budgetChars = Math.floor((MODEL_CONTEXT_CHARS[model] ?? DEFAULT_CONTEXT_CHARS) * HISTORY_BUDGET_RATIO)
+    // Use the live context size from the cache (populated by fetchModelList).
+    // Fall back to DEFAULT_CONTEXT_CHARS when the model hasn't been fetched yet.
+    const budgetChars = Math.floor((modelContextCharsCache.get(model) ?? DEFAULT_CONTEXT_CHARS) * HISTORY_BUDGET_RATIO)
 
     const systemMsgs = messages.filter((m) => m.role === 'system')
     const nonSystem = messages.filter((m) => m.role !== 'system')
@@ -438,24 +432,35 @@ export async function streamFromCW(payload: any): Promise<http.IncomingMessage> 
 // ── Models helper ─────────────────────────────────────────────────────────────
 
 export async function fetchModelList(): Promise<Array<{ modelId: string; modelName?: string; description?: string; contextTokens: number }>> {
-    if (AuthUtil.instance.isConnected()) {
-        try {
-            const profileArn = AuthUtil.instance.regionProfileManager?.activeRegionProfile?.arn
-            const response = await codeWhispererClient.listAvailableModels({
-                origin: 'AI_EDITOR',
-                ...(profileArn ? { profileArn } : {}),
-            })
-            return response.models.map((m: { modelId: string; modelName?: string; description?: string; tokenLimits?: { maxInputTokens?: number } }) => ({
-                modelId: m.modelId,
-                modelName: m.modelName,
-                description: m.description,
-                contextTokens: m.tokenLimits?.maxInputTokens ?? MODEL_CONTEXT_TOKENS[m.modelId] ?? 160_000,
-            }))
-        } catch (err) {
-            log.warn('serverUtils: listAvailableModels failed, using static list: %s', err)
-        }
+    if (!AuthUtil.instance.isConnected()) {
+        log.warn('serverUtils: not connected — cannot fetch model list')
+        return []
     }
-    return Object.entries(MODEL_CONTEXT_TOKENS).map(([modelId, contextTokens]) => ({ modelId, contextTokens }))
+    try {
+        const profileArn = AuthUtil.instance.regionProfileManager?.activeRegionProfile?.arn
+        const response = await codeWhispererClient.listAvailableModels({
+            // Use 'IDE' origin — same as the Amazon Q chat UI LSP layer.
+            // 'AI_EDITOR' returns a filtered subset (only Claude/amazon-q);
+            // 'IDE' returns the full model list including deepseek, qwen, etc.
+            origin: 'IDE',
+            ...(profileArn ? { profileArn } : {}),
+        })
+        const models = response.models.map((m: { modelId: string; modelName?: string; description?: string; tokenLimits?: { maxInputTokens?: number } }) => {
+            // Use the token limit from the API response.
+            // 160_000 tokens × 4 chars/token = 640_000 chars as a safe default
+            // when the API doesn't provide a limit for this model.
+            const contextTokens = m.tokenLimits?.maxInputTokens ?? 160_000
+            const contextChars = contextTokens * 4
+            // Populate the runtime cache so trimMessages can use live values
+            modelContextCharsCache.set(m.modelId, contextChars)
+            return { modelId: m.modelId, modelName: m.modelName, description: m.description, contextTokens }
+        })
+        log.info('serverUtils: fetched %d model(s) from listAvailableModels', models.length)
+        return models
+    } catch (err) {
+        log.warn('serverUtils: listAvailableModels failed: %s', err)
+        return []
+    }
 }
 
 // ── Body reader ───────────────────────────────────────────────────────────────

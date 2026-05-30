@@ -59,3 +59,19 @@ packages/*/resources/css/icons.css
 
 # License scanning output
 licenses-full.json
+
+# Compiled JS outputs from tsc (in-place compilation alongside .ts sources)
+# These are build artifacts and should not be committed.
+packages/*/src/**/*.js
+packages/*/test/**/*.js
+packages/*/scripts/**/*.js
+plugins/**/*.js
+scripts/*.js
+tsconfig.tsbuildinfo
+packages/*/tsconfig.tsbuildinfo
+
+# Exception: the testGenFolder math.js is a tracked intentional JS fixture
+!packages/core/src/testFixtures/workspaceFolder/testGenFolder/**/*.js
+
+# Extracted VSIX for inspection
+_vsix_extract/
