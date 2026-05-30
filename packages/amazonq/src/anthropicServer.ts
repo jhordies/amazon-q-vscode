@@ -828,8 +828,8 @@ function fileToMeta(f: StoredFile) {
 }
 
 async function handleFiles(method: string, pathParts: string[], req: http.IncomingMessage, res: http.ServerResponse) {
-    const fileId = pathParts[2] // /v1/files/:id
-    const subAction = pathParts[3] // content
+    const fileId = pathParts[3] // /v1/files/:id
+    const subAction = pathParts[4] // content
 
     if (method === 'POST' && !fileId) {
         // Upload file — multipart/form-data
@@ -918,7 +918,7 @@ async function handleModels(method: string, pathParts: string[], res: http.Serve
 // ── Skills API ────────────────────────────────────────────────────────────────
 
 function handleSkills(method: string, pathParts: string[], body: any, res: http.ServerResponse) {
-    const skillId = pathParts[2]
+    const skillId = pathParts[3]
     const now = Math.floor(Date.now() / 1000)
 
     if (method === 'POST' && !skillId) {
@@ -951,7 +951,7 @@ function handleSkills(method: string, pathParts: string[], body: any, res: http.
 // ── Agents API ────────────────────────────────────────────────────────────────
 
 function handleAgents(method: string, pathParts: string[], body: any, res: http.ServerResponse) {
-    const agentId = pathParts[2]
+    const agentId = pathParts[3]
     const now = Math.floor(Date.now() / 1000)
 
     if (method === 'POST' && !agentId) {
@@ -980,7 +980,7 @@ function handleAgents(method: string, pathParts: string[], body: any, res: http.
 // ── Environments API ──────────────────────────────────────────────────────────
 
 function handleEnvironments(method: string, pathParts: string[], body: any, res: http.ServerResponse) {
-    const envId = pathParts[2]
+    const envId = pathParts[3]
     const now = Math.floor(Date.now() / 1000)
 
     if (method === 'POST' && !envId) {
@@ -1053,8 +1053,8 @@ async function handleSessions(method: string, pathParts: string[], body: any, re
     const cfg = vscode.workspace.getConfiguration('amazonQ')
     const dockerEnabled = cfg.get<boolean>('anthropicServer.dockerEnabled', false)
 
-    const sessionId = pathParts[2]
-    const subAction = pathParts[3] // stream
+    const sessionId = pathParts[3]
+    const subAction = pathParts[4] // stream
 
     if (method === 'POST' && !sessionId) {
         if (!dockerEnabled) { notSupported(res, 'Sessions'); return }

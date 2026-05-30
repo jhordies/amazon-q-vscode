@@ -33,7 +33,18 @@ export const amazonqSettings = {
     "amazonQ.workspaceIndexIgnoreFilePatterns": {},
     "amazonQ.ignoredSecurityIssues": {},
     "amazonQ.proxy.certificateAuthority": {},
-    "amazonQ.proxy.enableProxyAndCertificateAutoDiscovery": {}
+    "amazonQ.proxy.enableProxyAndCertificateAutoDiscovery": {},
+    "amazonQ.openAICompatServer.autoStart": {},
+    "amazonQ.openAICompatServer.port": {},
+    "amazonQ.openaiServer.port": {},
+    "amazonQ.openaiServer.autoStart": {},
+    "amazonQ.anthropicServer.port": {},
+    "amazonQ.anthropicServer.autoStart": {},
+    "amazonQ.anthropicServer.retryOnPortBusy": {},
+    "amazonQ.anthropicServer.retryIntervalSeconds": {},
+    "amazonQ.anthropicServer.dockerEnabled": {},
+    "amazonQ.anthropicServer.defaultEnvironmentImage": {},
+    "amazonQ.anthropicServer.containerMemoryMb": {}
 }
 
 export default amazonqSettings
