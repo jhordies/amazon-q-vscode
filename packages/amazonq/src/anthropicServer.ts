@@ -755,8 +755,8 @@ async function processBatch(batchId: string, requests: BatchRequest[]) {
 }
 
 function handleBatches(method: string, pathParts: string[], body: any, res: http.ServerResponse) {
-    const batchId = pathParts[3] // /v1/messages/batches/:id
-    const subAction = pathParts[4] // results | cancel
+    const batchId = pathParts[4] // /v1/messages/batches/:id
+    const subAction = pathParts[5] // results | cancel
 
     if (method === 'POST' && !batchId) {
         // Create batch
