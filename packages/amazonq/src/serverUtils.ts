@@ -424,16 +424,25 @@ export interface SDKStreamEvent {
  * that must be accumulated until stop=true.  We handle this correctly here.
  */
 export async function* streamFromCWSDK(payload: any): AsyncIterable<SDKStreamEvent> {
-    // Use the shared client factory to avoid duplicating config logic
-    const { createCodeWhispererChatStreamingClient } = await import(
-        'aws-core-vscode/codewhisperer'
-    ) as any
+    // Directly instantiate CodeWhispererStreaming — same logic as createCodeWhispererChatStreamingClient
+    // but without the dynamic import that fails at runtime (function not exported from aws-core-vscode).
+    const { CodeWhispererStreaming } = await import('@amzn/codewhisperer-streaming')
+    const { ConfiguredRetryStrategy } = await import('@smithy/util-retry')
+
+    const token = await AuthUtil.instance.getBearerToken()
+    const clientConfig = AuthUtil.instance.regionProfileManager.clientConfig as { endpoint: string; region: string }
+
+    const client = new CodeWhispererStreaming({
+        region: clientConfig.region,
+        endpoint: clientConfig.endpoint,
+        token: { token },
+        retryStrategy: new ConfiguredRetryStrategy(1, (attempt: number) => 500 + attempt ** 10),
+    })
 
     const toolNames = payload?.conversationState?.currentMessage?.userInputMessage?.userInputMessageContext?.tools
         ?.map((t: any) => t.toolSpecification?.name)
     log.debug('[streamFromCWSDK] calling generateAssistantResponse tools=%s', JSON.stringify(toolNames))
 
-    const client = await createCodeWhispererChatStreamingClient()
     const response = await client.generateAssistantResponse(payload)
     if (!response.generateAssistantResponseResponse) {
         throw new Error('Empty generateAssistantResponse response')
