@@ -57,8 +57,7 @@ import {
     trimMessages,
     buildSessionKey,
     buildKiroPayload,
-    streamFromCW,
-    parseChunk,
+    streamFromCWSDK,
     extractText,
     sanitizeSchema,
     fetchModelList,
@@ -354,78 +353,41 @@ async function executeMessages(req: AnthropicMessagesRequest): Promise<any> {
     const payload = buildKiroPayload(oaiReq, conversationId, profileArn)
     if (req.max_tokens) payload.conversationState.currentMessage.userInputMessage.maxTokens = req.max_tokens
 
-    const upstream = await streamFromCW(payload)
-    if (upstream.statusCode !== 200) {
-        const chunks: Buffer[] = []
-        for await (const c of upstream) chunks.push(c as Buffer)
-        throw new Error(`Upstream ${upstream.statusCode}: ${Buffer.concat(chunks).toString()}`)
-    }
-
-    const buffer = { value: '' }
+    // Use SDK-based streaming to get properly deserialized tool inputs
     const toolCalls: any[] = []
-    let currentTool: any = null
     let fullContent = ''
-    let lastContent: string | null = null
     let promptTokens = 0
     let completionTokens = 0
 
-    for await (const raw of upstream) {
-        buffer.value += (raw as Buffer).toString('utf-8')
-        for (const ev of parseChunk(buffer)) {
-            if (ev.type === 'content') {
-                const text = ev.data.content ?? ''
-                if (text !== lastContent) { fullContent += text; lastContent = text }
-            } else if (ev.type === 'tool_start') {
-                if (currentTool) toolCalls.push(currentTool)
-                currentTool = {
-                    id: ev.data.toolUseId ?? `toolu_${randomUUID().slice(0, 8)}`,
-                    name: ev.data.name ?? '',
-                    input: typeof ev.data.input === 'object' ? ev.data.input : {},
-                    _rawArgs: typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? ''),
-                }
-                if (ev.data.stop) { toolCalls.push(currentTool); currentTool = null }
-            } else if (ev.type === 'tool_input' && currentTool) {
-                if (typeof ev.data.input === 'object') {
-                    Object.assign(currentTool.input, ev.data.input)
-                } else {
-                    currentTool._rawArgs += ev.data.input ?? ''
-                }
-            } else if (ev.type === 'tool_stop' && currentTool) {
-                try { currentTool.input = JSON.parse(currentTool._rawArgs) } catch { /* keep partial */ }
-                toolCalls.push(currentTool); currentTool = null
-            } else if (ev.type === 'usage') {
-                promptTokens = ev.data.inputTokens ?? ev.data.inputTokenCount ?? promptTokens
-                completionTokens = ev.data.outputTokens ?? ev.data.outputTokenCount ?? completionTokens
-            } else if (ev.type === 'context_usage') {
-                const pct: number = ev.data.contextUsagePercentage ?? 0
-                const state = convStateMap.get(sessionKey) ?? { contextUsagePct: 0 }
-                state.contextUsagePct = pct
-                convStateMap.set(sessionKey, state)
-                sessionStore.updateConvState(sessionId, { contextUsagePct: pct })
-            }
+    for await (const ev of streamFromCWSDK(payload)) {
+        if (ev.type === 'content') {
+            fullContent += ev.data.content ?? ''
+        } else if (ev.type === 'tool_start') {
+            toolCalls.push({
+                id: ev.data.toolUseId ?? `toolu_${randomUUID().slice(0, 8)}`,
+                name: ev.data.name ?? '',
+                input: ev.data.input ?? {},
+            })
+        } else if (ev.type === 'usage') {
+            promptTokens = ev.data.inputTokens ?? ev.data.inputTokenCount ?? promptTokens
+            completionTokens = ev.data.outputTokens ?? ev.data.outputTokenCount ?? completionTokens
+        } else if (ev.type === 'context_usage') {
+            const pct: number = ev.data.contextUsagePercentage ?? 0
+            const state = convStateMap.get(sessionKey) ?? { contextUsagePct: 0 }
+            state.contextUsagePct = pct
+            convStateMap.set(sessionKey, state)
+            sessionStore.updateConvState(sessionId, { contextUsagePct: pct })
         }
     }
-    if (currentTool) {
-        try { currentTool.input = JSON.parse(currentTool._rawArgs) } catch {}
-        toolCalls.push(currentTool)
-    }
-
-    // Deduplicate tool calls
-    const seen = new Map<string, any>()
-    for (const tc of toolCalls) {
-        const existing = seen.get(tc.id)
-        if (!existing || JSON.stringify(tc.input).length > JSON.stringify(existing.input).length) seen.set(tc.id, tc)
-    }
-    const dedupedTools = [...seen.values()]
 
     // Build Anthropic content blocks
     const contentBlocks: any[] = []
     if (fullContent) contentBlocks.push({ type: 'text', text: fullContent })
-    for (const tc of dedupedTools) {
+    for (const tc of toolCalls) {
         contentBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
     }
 
-    const stopReason = dedupedTools.length ? 'tool_use' : 'end_turn'
+    const stopReason = toolCalls.length ? 'tool_use' : 'end_turn'
     const msgId = `msg_${randomUUID().replace(/-/g, '').slice(0, 24)}`
 
     return {
@@ -494,44 +456,63 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
     const payload = buildKiroPayload(oaiReq, conversationId, profileArn)
     if (req.max_tokens) payload.conversationState.currentMessage.userInputMessage.maxTokens = req.max_tokens
 
-    let upstream: http.IncomingMessage
+    // ── Both streaming and non-streaming use SDK-based approach ──────────────
+    // streamFromCWSDK uses the CodeWhispererStreaming SDK which properly
+    // deserializes the binary AWS event stream, giving us tool inputs as
+    // JavaScript objects rather than empty {} from the raw binary stream.
+
+    const toolCalls: any[] = []
+    let fullContent = ''
+    let promptTokens = 0
+    let completionTokens = 0
+
     try {
-        upstream = await streamFromCW(payload)
+        for await (const ev of streamFromCWSDK(payload)) {
+            if (ev.type === 'content') {
+                fullContent += ev.data.content ?? ''
+            } else if (ev.type === 'tool_start') {
+                toolCalls.push({
+                    id: ev.data.toolUseId ?? `toolu_${randomUUID().slice(0, 8)}`,
+                    name: ev.data.name ?? '',
+                    input: ev.data.input ?? {},
+                })
+            } else if (ev.type === 'usage') {
+                promptTokens = ev.data.inputTokens ?? ev.data.inputTokenCount ?? promptTokens
+                completionTokens = ev.data.outputTokens ?? ev.data.outputTokenCount ?? completionTokens
+            } else if (ev.type === 'context_usage') {
+                const pct: number = ev.data.contextUsagePercentage ?? 0
+                const state = convStateMap.get(sessionKey) ?? { contextUsagePct: 0 }
+                state.contextUsagePct = pct
+                convStateMap.set(sessionKey, state)
+                sessionStore.updateConvState(sessionId, { contextUsagePct: pct })
+            }
+        }
     } catch (err: any) {
-        log.error('anthropicServer: CW request failed: %s', err)
+        log.error('anthropicServer: SDK stream failed: %s', err)
         anthropicError(res, 502, 'api_error', `Upstream error: ${err.message}`)
         return
     }
 
-    if (upstream.statusCode !== 200) {
-        const chunks: Buffer[] = []
-        for await (const c of upstream) chunks.push(c as Buffer)
-        anthropicError(res, upstream.statusCode ?? 502, 'api_error', `Upstream ${upstream.statusCode}: ${Buffer.concat(chunks).toString()}`)
-        return
+    // Persist assistant turn
+    const assistantMsg: OpenAIMessage = { role: 'assistant', content: fullContent || null }
+    if (toolCalls.length) {
+        assistantMsg.tool_calls = toolCalls.map((tc) => ({
+            id: tc.id, type: 'function',
+            function: { name: tc.name, arguments: JSON.stringify(tc.input) },
+        }))
     }
+    sessionStore.append(sessionId, [assistantMsg])
 
-    const buffer = { value: '' }
-    const toolCalls: any[] = []
-    let currentTool: any = null
-    let lastContent: string | null = null
-    let promptTokens = 0
-    let completionTokens = 0
-
-    const handleMetaEvent = (ev: any) => {
-        if (ev.type === 'usage') {
-            promptTokens = ev.data.inputTokens ?? ev.data.inputTokenCount ?? promptTokens
-            completionTokens = ev.data.outputTokens ?? ev.data.outputTokenCount ?? completionTokens
-        } else if (ev.type === 'context_usage') {
-            const pct: number = ev.data.contextUsagePercentage ?? 0
-            const state = convStateMap.get(sessionKey) ?? { contextUsagePct: 0 }
-            state.contextUsagePct = pct
-            convStateMap.set(sessionKey, state)
-            sessionStore.updateConvState(sessionId, { contextUsagePct: pct })
-        }
-    }
+    const contentBlocks: any[] = []
+    if (fullContent) contentBlocks.push({ type: 'text', text: fullContent })
+    for (const tc of toolCalls) contentBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+    const stopReason = toolCalls.length ? 'tool_use' : 'end_turn'
 
     if (req.stream) {
         // ── Streaming: Anthropic SSE format ──────────────────────────────────
+        // Note: we collected all events first, then emit them as SSE.
+        // True streaming would require a different approach but the SDK
+        // doesn't expose a streaming interface that maps cleanly to SSE.
         res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
@@ -544,76 +525,27 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
             res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
         }
 
-        // message_start
         sendEvent('message_start', {
             type: 'message_start',
             message: { id: msgId, type: 'message', role: 'assistant', content: [], model, stop_reason: null, stop_sequence: null,
-                usage: { input_tokens: 0, output_tokens: 0 } },
+                usage: { input_tokens: promptTokens, output_tokens: 0 } },
         })
 
         let blockIndex = 0
-        let textBlockOpen = false
-        let streamedContent = ''
-
-        for await (const raw of upstream) {
-            buffer.value += (raw as Buffer).toString('utf-8')
-            for (const ev of parseChunk(buffer)) {
-                if (ev.type === 'content') {
-                    const text = ev.data.content ?? ''
-                    if (text === lastContent) continue
-                    lastContent = text
-                    streamedContent += text
-                    if (!textBlockOpen) {
-                        sendEvent('content_block_start', { type: 'content_block_start', index: blockIndex, content_block: { type: 'text', text: '' } })
-                        textBlockOpen = true
-                    }
-                    sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text } })
-                } else if (ev.type === 'tool_start') {
-                    if (textBlockOpen) {
-                        sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex })
-                        blockIndex++
-                        textBlockOpen = false
-                    }
-                    if (currentTool) toolCalls.push(currentTool)
-                    const toolId = ev.data.toolUseId ?? `toolu_${randomUUID().slice(0, 8)}`
-                    const initialInput = typeof ev.data.input === 'object' ? ev.data.input : {}
-                    currentTool = { id: toolId, name: ev.data.name ?? '', input: initialInput, _rawArgs: typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? ''), _blockIndex: blockIndex }
-                    sendEvent('content_block_start', { type: 'content_block_start', index: blockIndex, content_block: { type: 'tool_use', id: toolId, name: ev.data.name ?? '', input: {} } })
-                    if (currentTool._rawArgs) {
-                        sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIndex, delta: { type: 'input_json_delta', partial_json: currentTool._rawArgs } })
-                    }
-                    if (ev.data.stop) {
-                        sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex })
-                        blockIndex++
-                        toolCalls.push(currentTool); currentTool = null
-                    }
-                } else if (ev.type === 'tool_input' && currentTool) {
-                    const inp = typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? '')
-                    if (inp) {
-                        currentTool._rawArgs += inp
-                        sendEvent('content_block_delta', { type: 'content_block_delta', index: currentTool._blockIndex, delta: { type: 'input_json_delta', partial_json: inp } })
-                    }
-                } else if (ev.type === 'tool_stop' && currentTool) {
-                    try { currentTool.input = JSON.parse(currentTool._rawArgs) } catch {}
-                    sendEvent('content_block_stop', { type: 'content_block_stop', index: currentTool._blockIndex })
-                    blockIndex++
-                    toolCalls.push(currentTool); currentTool = null
-                } else {
-                    handleMetaEvent(ev)
-                }
-            }
-        }
-
-        if (currentTool) {
-            try { currentTool.input = JSON.parse(currentTool._rawArgs) } catch {}
-            sendEvent('content_block_stop', { type: 'content_block_stop', index: currentTool._blockIndex })
-            toolCalls.push(currentTool)
-        }
-        if (textBlockOpen) {
+        if (fullContent) {
+            sendEvent('content_block_start', { type: 'content_block_start', index: blockIndex, content_block: { type: 'text', text: '' } })
+            sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text: fullContent } })
             sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex })
+            blockIndex++
+        }
+        for (const tc of toolCalls) {
+            const inputJson = JSON.stringify(tc.input)
+            sendEvent('content_block_start', { type: 'content_block_start', index: blockIndex, content_block: { type: 'tool_use', id: tc.id, name: tc.name, input: {} } })
+            sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIndex, delta: { type: 'input_json_delta', partial_json: inputJson } })
+            sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex })
+            blockIndex++
         }
 
-        const stopReason = toolCalls.length ? 'tool_use' : 'end_turn'
         sendEvent('message_delta', {
             type: 'message_delta',
             delta: { stop_reason: stopReason, stop_sequence: null },
@@ -621,72 +553,8 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
         })
         sendEvent('message_stop', { type: 'message_stop' })
         res.end()
-
-        // Persist assistant turn
-        const assistantMsg: OpenAIMessage = { role: 'assistant', content: streamedContent || null }
-        if (toolCalls.length) {
-            assistantMsg.tool_calls = toolCalls.map((tc) => ({
-                id: tc.id, type: 'function',
-                function: { name: tc.name, arguments: JSON.stringify(tc.input) },
-            }))
-        }
-        sessionStore.append(sessionId, [assistantMsg])
     } else {
         // ── Non-streaming ─────────────────────────────────────────────────────
-        let fullContent = ''
-        for await (const raw of upstream) {
-            buffer.value += (raw as Buffer).toString('utf-8')
-            for (const ev of parseChunk(buffer)) {
-                if (ev.type === 'content') {
-                    const text = ev.data.content ?? ''
-                    if (text !== lastContent) { fullContent += text; lastContent = text }
-                } else if (ev.type === 'tool_start') {
-                    if (currentTool) toolCalls.push(currentTool)
-                    currentTool = {
-                        id: ev.data.toolUseId ?? `toolu_${randomUUID().slice(0, 8)}`,
-                        name: ev.data.name ?? '',
-                        input: typeof ev.data.input === 'object' ? ev.data.input : {},
-                        _rawArgs: typeof ev.data.input === 'object' ? JSON.stringify(ev.data.input) : (ev.data.input ?? ''),
-                    }
-                    if (ev.data.stop) { toolCalls.push(currentTool); currentTool = null }
-                } else if (ev.type === 'tool_input' && currentTool) {
-                    if (typeof ev.data.input === 'object') Object.assign(currentTool.input, ev.data.input)
-                    else currentTool._rawArgs += ev.data.input ?? ''
-                } else if (ev.type === 'tool_stop' && currentTool) {
-                    try { currentTool.input = JSON.parse(currentTool._rawArgs) } catch {}
-                    toolCalls.push(currentTool); currentTool = null
-                } else { handleMetaEvent(ev) }
-            }
-        }
-        if (currentTool) {
-            try { currentTool.input = JSON.parse(currentTool._rawArgs) } catch {}
-            toolCalls.push(currentTool)
-        }
-
-        // Deduplicate
-        const seen = new Map<string, any>()
-        for (const tc of toolCalls) {
-            const ex = seen.get(tc.id)
-            if (!ex || JSON.stringify(tc.input).length > JSON.stringify(ex.input).length) seen.set(tc.id, tc)
-        }
-        const deduped = [...seen.values()]
-
-        const contentBlocks: any[] = []
-        if (fullContent) contentBlocks.push({ type: 'text', text: fullContent })
-        for (const tc of deduped) contentBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
-
-        const stopReason = deduped.length ? 'tool_use' : 'end_turn'
-
-        // Persist assistant turn
-        const assistantMsg: OpenAIMessage = { role: 'assistant', content: fullContent || null }
-        if (deduped.length) {
-            assistantMsg.tool_calls = deduped.map((tc) => ({
-                id: tc.id, type: 'function',
-                function: { name: tc.name, arguments: JSON.stringify(tc.input) },
-            }))
-        }
-        sessionStore.append(sessionId, [assistantMsg])
-
         res.writeHead(200, {
             'Content-Type': 'application/json',
             'X-Session-Id': sessionId,

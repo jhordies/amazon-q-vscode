@@ -400,7 +400,87 @@ export function parseChunk(buffer: { value: string }): ParsedEvent[] {
     return events
 }
 
-// ── HTTP request to CodeWhisperer API ────────────────────────────────────────
+// ── AWS SDK streaming client ──────────────────────────────────────────────────
+//
+// The proxy server uses the CodeWhispererStreaming SDK client to call
+// generateAssistantResponse. The SDK handles the binary AWS event stream
+// deserialization automatically, returning properly structured toolUses
+// with input as a JavaScript object — no manual binary parsing needed.
+//
+// streamFromCW is kept for backward compatibility but now delegates to
+// the SDK-based streamFromCWSDK for the actual call.
+
+export interface SDKStreamEvent {
+    type: 'content' | 'tool_start' | 'tool_stop' | 'usage' | 'context_usage'
+    data: any
+}
+
+/**
+ * Call generateAssistantResponse via the SDK client and return an async
+ * iterable of parsed events.  This replaces the raw-HTTPS + parseChunk
+ * approach which failed to extract tool input from the binary event stream.
+ */
+export async function* streamFromCWSDK(payload: any): AsyncIterable<SDKStreamEvent> {
+    const { CodeWhispererStreaming } = await import('@amzn/codewhisperer-streaming')
+    const { ConfiguredRetryStrategy } = await import('@smithy/util-retry')
+    const { getCodewhispererConfig } = await import('aws-core-vscode/codewhisperer')
+
+    const token = await AuthUtil.instance.getBearerToken()
+    const cwsprConfig = getCodewhispererConfig()
+
+    const client = new CodeWhispererStreaming({
+        region: cwsprConfig.region,
+        endpoint: cwsprConfig.endpoint,
+        token: { token },
+        retryStrategy: new ConfiguredRetryStrategy(1, (attempt: number) => 500 + attempt ** 10),
+    })
+
+    const toolNames = payload?.conversationState?.currentMessage?.userInputMessage?.userInputMessageContext?.tools
+        ?.map((t: any) => t.toolSpecification?.name)
+    log.debug('[streamFromCWSDK] calling generateAssistantResponse tools=%s', JSON.stringify(toolNames))
+
+    const response = await client.generateAssistantResponse(payload)
+    if (!response.generateAssistantResponseResponse) {
+        throw new Error('Empty generateAssistantResponse response')
+    }
+
+    for await (const event of response.generateAssistantResponseResponse) {
+        if ('assistantResponseEvent' in event) {
+            const msg = event.assistantResponseEvent
+            if (!msg) continue
+
+            // Text content
+            if (msg.content) {
+                yield { type: 'content', data: { content: msg.content } }
+            }
+
+            // Tool calls — the SDK gives us fully deserialized toolUses with input as object
+            if (msg.toolUses?.length) {
+                for (const tu of msg.toolUses) {
+                    log.debug('[streamFromCWSDK] tool_use: name=%s id=%s input=%s',
+                        tu.name, tu.toolUseId, JSON.stringify(tu.input))
+                    yield {
+                        type: 'tool_start',
+                        data: {
+                            name: tu.name,
+                            toolUseId: tu.toolUseId,
+                            input: tu.input ?? {},
+                            stop: true,
+                        },
+                    }
+                }
+            }
+        } else if ('messageMetadataEvent' in event) {
+            // context usage percentage
+            const pct = (event.messageMetadataEvent as any)?.contextUsagePercentage
+            if (pct !== undefined) {
+                yield { type: 'context_usage', data: { contextUsagePercentage: pct } }
+            }
+        }
+    }
+}
+
+// ── Legacy raw-HTTPS stream (kept for reference / fallback) ───────────────────
 
 function postStream(url: string, body: string, headers: Record<string, string>): Promise<http.IncomingMessage> {
     return new Promise((resolve, reject) => {
@@ -427,26 +507,7 @@ export async function streamFromCW(payload: any): Promise<http.IncomingMessage> 
         Authorization: `Bearer ${token}`,
         'x-amzn-codewhisperer-optout': 'false',
     }
-    const toolNames = payload?.conversationState?.currentMessage?.userInputMessage?.userInputMessageContext?.tools
-        ?.map((t: any) => t.toolSpecification?.name)
-    log.debug('[streamFromCW] POST %s tools=%s', url, JSON.stringify(toolNames))
-    const upstream = await postStream(url, JSON.stringify(payload), headers)
-    // Wrap the stream to log raw bytes for debugging tool input parsing
-    const origOn = (upstream as any).on.bind(upstream)
-    const rawChunks: string[] = []
-    ;(upstream as any).on = function(event: string, listener: (...args: any[]) => void) {
-        if (event === 'data') {
-            return origOn(event, (chunk: Buffer) => {
-                rawChunks.push(chunk.toString())
-                if (rawChunks.join('').length < 2000) {
-                    log.debug('[streamFromCW] raw chunk: %s', chunk.toString().slice(0, 500))
-                }
-                listener(chunk)
-            })
-        }
-        return origOn(event, listener)
-    }
-    return upstream
+    return postStream(url, JSON.stringify(payload), headers)
 }
 
 // ── Models helper ─────────────────────────────────────────────────────────────
