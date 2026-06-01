@@ -419,63 +419,73 @@ export interface SDKStreamEvent {
  * Call generateAssistantResponse via the SDK client and return an async
  * iterable of parsed events.  This replaces the raw-HTTPS + parseChunk
  * approach which failed to extract tool input from the binary event stream.
+ *
+ * The streaming SDK sends tool calls as ToolUseEvent with partial JSON input
+ * that must be accumulated until stop=true.  We handle this correctly here.
  */
 export async function* streamFromCWSDK(payload: any): AsyncIterable<SDKStreamEvent> {
-    const { CodeWhispererStreaming } = await import('@amzn/codewhisperer-streaming')
-    const { ConfiguredRetryStrategy } = await import('@smithy/util-retry')
-    const { getCodewhispererConfig } = await import('aws-core-vscode/codewhisperer')
-
-    const token = await AuthUtil.instance.getBearerToken()
-    const cwsprConfig = getCodewhispererConfig()
-
-    const client = new CodeWhispererStreaming({
-        region: cwsprConfig.region,
-        endpoint: cwsprConfig.endpoint,
-        token: { token },
-        retryStrategy: new ConfiguredRetryStrategy(1, (attempt: number) => 500 + attempt ** 10),
-    })
+    // Use the shared client factory to avoid duplicating config logic
+    const { createCodeWhispererChatStreamingClient } = await import(
+        'aws-core-vscode/codewhisperer'
+    ) as any
 
     const toolNames = payload?.conversationState?.currentMessage?.userInputMessage?.userInputMessageContext?.tools
         ?.map((t: any) => t.toolSpecification?.name)
     log.debug('[streamFromCWSDK] calling generateAssistantResponse tools=%s', JSON.stringify(toolNames))
 
+    const client = await createCodeWhispererChatStreamingClient()
     const response = await client.generateAssistantResponse(payload)
     if (!response.generateAssistantResponseResponse) {
         throw new Error('Empty generateAssistantResponse response')
     }
 
+    // Accumulate partial tool input JSON per toolUseId
+    const toolInputBuffers = new Map<string, { name: string; rawArgs: string }>()
+
     for await (const event of response.generateAssistantResponseResponse) {
         if ('assistantResponseEvent' in event) {
-            const msg = event.assistantResponseEvent
-            if (!msg) continue
-
-            // Text content
-            if (msg.content) {
+            const msg = (event as any).assistantResponseEvent
+            if (msg?.content) {
                 yield { type: 'content', data: { content: msg.content } }
             }
-
-            // Tool calls — the SDK gives us fully deserialized toolUses with input as object
-            if (msg.toolUses?.length) {
-                for (const tu of msg.toolUses) {
-                    log.debug('[streamFromCWSDK] tool_use: name=%s id=%s input=%s',
-                        tu.name, tu.toolUseId, JSON.stringify(tu.input))
-                    yield {
-                        type: 'tool_start',
-                        data: {
-                            name: tu.name,
-                            toolUseId: tu.toolUseId,
-                            input: tu.input ?? {},
-                            stop: true,
-                        },
-                    }
+        } else if ('toolUseEvent' in event) {
+            // ToolUseEvent: partial JSON input streamed until stop=true
+            const tu = (event as any).toolUseEvent
+            if (!tu) continue
+            const id = tu.toolUseId ?? ''
+            if (!toolInputBuffers.has(id)) {
+                toolInputBuffers.set(id, { name: tu.name ?? '', rawArgs: '' })
+            }
+            const buf = toolInputBuffers.get(id)!
+            if (tu.input) buf.rawArgs += tu.input
+            if (tu.stop) {
+                let input: any = {}
+                try { input = JSON.parse(buf.rawArgs) } catch { /* keep empty */ }
+                log.debug('[streamFromCWSDK] tool_use complete: name=%s id=%s input=%s',
+                    buf.name, id, JSON.stringify(input))
+                yield {
+                    type: 'tool_start',
+                    data: { name: buf.name, toolUseId: id, input, stop: true },
                 }
+                toolInputBuffers.delete(id)
             }
         } else if ('messageMetadataEvent' in event) {
-            // context usage percentage
-            const pct = (event.messageMetadataEvent as any)?.contextUsagePercentage
+            const pct = (event as any).messageMetadataEvent?.contextUsagePercentage
             if (pct !== undefined) {
                 yield { type: 'context_usage', data: { contextUsagePercentage: pct } }
             }
+        }
+    }
+
+    // Flush any incomplete tool calls (stop never arrived)
+    for (const [id, buf] of toolInputBuffers) {
+        let input: any = {}
+        try { input = JSON.parse(buf.rawArgs) } catch { /* keep empty */ }
+        log.debug('[streamFromCWSDK] tool_use flush: name=%s id=%s input=%s',
+            buf.name, id, JSON.stringify(input))
+        yield {
+            type: 'tool_start',
+            data: { name: buf.name, toolUseId: id, input, stop: true },
         }
     }
 }
