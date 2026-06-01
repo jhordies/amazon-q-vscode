@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/naming-convention, unicorn/no-null */
 /*!
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -83,7 +84,11 @@ export class GatewaySessionManager {
         if (incomingSessionId) {
             const session = sessionStore.get(incomingSessionId)
             if (!session) {
-                throw new GatewayError(400, 'invalid_request_error', `Unknown session ID: ${incomingSessionId}. Start a new conversation without X-Session-Id.`)
+                throw new GatewayError(
+                    400,
+                    'invalid_request_error',
+                    `Unknown session ID: ${incomingSessionId}. Start a new conversation without X-Session-Id.`
+                )
             }
             const merged = sessionStore.append(incomingSessionId, messages, tools)
             if (!merged) {
@@ -99,14 +104,14 @@ export class GatewaySessionManager {
     /**
      * Handle context compression when usage exceeds threshold.
      */
-    static handleContextCompression(
-        sessionKey: string,
-        sessionId: string,
-        messages: OpenAIMessage[]
-    ): void {
+    static handleContextCompression(sessionKey: string, sessionId: string, messages: OpenAIMessage[]): void {
         const prevState = convStateMap.get(sessionKey) ?? sessionStore.get(sessionId)?.convState
         if (prevState?.contextUsagePct !== undefined && prevState.contextUsagePct >= 90) {
-            log.warn('Gateway: context at %d%% — compressing history for session %s', prevState.contextUsagePct, sessionId)
+            log.warn(
+                'Gateway: context at %d%% — compressing history for session %s',
+                prevState.contextUsagePct,
+                sessionId
+            )
             const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')
             prevState.summary = lastAssistant
                 ? `Last assistant response: ${extractText(lastAssistant.content).slice(0, 2000)}`
@@ -118,18 +123,18 @@ export class GatewaySessionManager {
     /**
      * Update context usage percentage from upstream events.
      */
-    static updateContextUsage(
-        sessionKey: string,
-        sessionId: string,
-        contextUsagePercentage: number
-    ): void {
+    static updateContextUsage(sessionKey: string, sessionId: string, contextUsagePercentage: number): void {
         const state = convStateMap.get(sessionKey) ?? { contextUsagePct: 0 }
         state.contextUsagePct = contextUsagePercentage
         convStateMap.set(sessionKey, state)
         sessionStore.updateConvState(sessionId, { contextUsagePct: contextUsagePercentage })
-        
+
         if (contextUsagePercentage >= 75) {
-            log.warn('Gateway: context pressure %d%% — approaching limit (session=%s)', contextUsagePercentage, sessionId)
+            log.warn(
+                'Gateway: context pressure %d%% — approaching limit (session=%s)',
+                contextUsagePercentage,
+                sessionId
+            )
         }
     }
 }
@@ -164,21 +169,28 @@ export class GatewayStreamProcessor {
         switch (event.type) {
             case 'content': {
                 const text = event.data.content ?? ''
-                if (text === state.lastContent) return null
+                if (text === state.lastContent) {
+                    return null
+                }
                 state.lastContent = text
                 state.streamedContent += text
                 return { type: 'content', data: text }
             }
 
             case 'tool_start': {
-                if (state.currentTool) state.toolCalls.push(state.currentTool)
+                if (state.currentTool) {
+                    state.toolCalls.push(state.currentTool)
+                }
                 const toolId = event.data.toolUseId ?? `tool_${randomUUID().slice(0, 8)}`
                 const initialInput = typeof event.data.input === 'object' ? event.data.input : {}
                 state.currentTool = {
                     id: toolId,
                     name: event.data.name ?? '',
                     input: initialInput,
-                    _rawArgs: typeof event.data.input === 'object' ? JSON.stringify(event.data.input) : (event.data.input ?? ''),
+                    _rawArgs:
+                        typeof event.data.input === 'object'
+                            ? JSON.stringify(event.data.input)
+                            : (event.data.input ?? ''),
                 }
                 if (event.data.stop) {
                     state.toolCalls.push(state.currentTool)
@@ -188,8 +200,11 @@ export class GatewayStreamProcessor {
             }
 
             case 'tool_input': {
-                if (!state.currentTool) return null
-                const inp = typeof event.data.input === 'object' ? JSON.stringify(event.data.input) : (event.data.input ?? '')
+                if (!state.currentTool) {
+                    return null
+                }
+                const inp =
+                    typeof event.data.input === 'object' ? JSON.stringify(event.data.input) : (event.data.input ?? '')
                 if (inp) {
                     state.currentTool._rawArgs += inp
                     if (typeof event.data.input === 'object') {
@@ -200,7 +215,9 @@ export class GatewayStreamProcessor {
             }
 
             case 'tool_stop': {
-                if (!state.currentTool) return null
+                if (!state.currentTool) {
+                    return null
+                }
                 try {
                     state.currentTool.input = JSON.parse(state.currentTool._rawArgs)
                 } catch {
@@ -214,8 +231,12 @@ export class GatewayStreamProcessor {
 
             case 'usage': {
                 state.promptTokens = event.data.inputTokens ?? event.data.inputTokenCount ?? state.promptTokens
-                state.completionTokens = event.data.outputTokens ?? event.data.outputTokenCount ?? state.completionTokens
-                return { type: 'meta', data: { type: 'usage', prompt: state.promptTokens, completion: state.completionTokens } }
+                state.completionTokens =
+                    event.data.outputTokens ?? event.data.outputTokenCount ?? state.completionTokens
+                return {
+                    type: 'meta',
+                    data: { type: 'usage', prompt: state.promptTokens, completion: state.completionTokens },
+                }
             }
 
             case 'context_usage': {
@@ -265,7 +286,7 @@ export class GatewayStreamProcessor {
         sessionId?: string
     ): Promise<GatewayResponse> {
         const state = GatewayStreamProcessor.createState()
-        
+
         for await (const raw of upstream) {
             state.buffer.value += (raw as Buffer).toString('utf-8')
             for (const ev of parseChunk(state.buffer)) {
@@ -274,7 +295,7 @@ export class GatewayStreamProcessor {
         }
 
         const dedupedToolCalls = GatewayStreamProcessor.finalizeToolCalls(state)
-        
+
         return {
             content: state.streamedContent,
             toolCalls: dedupedToolCalls,
@@ -296,11 +317,11 @@ export class GatewayRequestProcessor {
         sessionKey: string
     ): Promise<{ upstream: http.IncomingMessage; trimmedMessages: OpenAIMessage[] }> {
         const { model, messages, tools, max_tokens } = request
-        
+
         // Get previous state and trim messages
         const prevState = convStateMap.get(sessionKey) ?? sessionStore.get(sessionId)?.convState
         const trimmedMessages = trimMessages(messages, model, prevState)
-        
+
         // Build payload
         const conversationId = randomUUID()
         const oaiReq: OpenAIChatRequest = {
@@ -310,32 +331,30 @@ export class GatewayRequestProcessor {
             stream: request.stream,
             max_tokens,
         }
-        
+
         const payload = buildKiroPayload(oaiReq, conversationId, undefined)
         if (max_tokens) {
             payload.conversationState.currentMessage.userInputMessage.maxTokens = max_tokens
         }
-        
+
         // Execute request
         const upstream = await streamFromCW(payload)
         if (upstream.statusCode !== 200) {
             const chunks: Buffer[] = []
-            for await (const c of upstream) chunks.push(c as Buffer)
+            for await (const c of upstream) {
+                chunks.push(c as Buffer)
+            }
             const body = Buffer.concat(chunks).toString()
             throw new GatewayError(upstream.statusCode ?? 502, 'api_error', `Upstream ${upstream.statusCode}: ${body}`)
         }
-        
+
         return { upstream, trimmedMessages }
     }
 
     /**
      * Persist assistant turn to session store.
      */
-    static persistAssistantTurn(
-        sessionId: string,
-        content: string,
-        toolCalls: GatewayToolCall[]
-    ): void {
+    static persistAssistantTurn(sessionId: string, content: string, toolCalls: GatewayToolCall[]): void {
         const assistantMsg: OpenAIMessage = { role: 'assistant', content: content || null }
         if (toolCalls.length) {
             assistantMsg.tool_calls = toolCalls.map((tc) => ({
@@ -366,7 +385,7 @@ export class GatewayError extends Error {
                 message: this.message,
                 type: this.type,
                 code: this.statusCode.toString(),
-            }
+            },
         }
     }
 
@@ -376,7 +395,7 @@ export class GatewayError extends Error {
             error: {
                 type: this.type,
                 message: this.message,
-            }
+            },
         }
     }
 }
@@ -398,7 +417,7 @@ export class GatewayResponseBuilder {
     ): any {
         const created = Math.floor(Date.now() / 1000)
         const finishReason = toolCalls.length ? 'tool_calls' : 'stop'
-        
+
         if (stream) {
             // Streaming response is built incrementally
             return {
@@ -406,14 +425,16 @@ export class GatewayResponseBuilder {
                 object: 'chat.completion.chunk',
                 created,
                 model,
-                choices: [{
-                    index: 0,
-                    delta: {},
-                    finish_reason: null,
-                }],
+                choices: [
+                    {
+                        index: 0,
+                        delta: {},
+                        finish_reason: null,
+                    },
+                ],
             }
         }
-        
+
         const message: any = { role: 'assistant', content }
         if (toolCalls.length) {
             message.tool_calls = toolCalls.map((tc) => ({
@@ -422,7 +443,7 @@ export class GatewayResponseBuilder {
                 function: { name: tc.name, arguments: JSON.stringify(tc.input) },
             }))
         }
-        
+
         return {
             id: requestId,
             object: 'chat.completion',
@@ -449,13 +470,15 @@ export class GatewayResponseBuilder {
         completionTokens: number
     ): any {
         const contentBlocks: any[] = []
-        if (content) contentBlocks.push({ type: 'text', text: content })
+        if (content) {
+            contentBlocks.push({ type: 'text', text: content })
+        }
         for (const tc of toolCalls) {
             contentBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
         }
-        
+
         const stopReason = toolCalls.length ? 'tool_use' : 'end_turn'
-        
+
         return {
             id: messageId,
             type: 'message',

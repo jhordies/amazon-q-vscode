@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/naming-convention, unicorn/no-null, no-restricted-imports, @typescript-eslint/no-floating-promises */
 /*!
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -202,7 +203,9 @@ function anthropicContentToOpenAI(content: string | AnthropicContentBlock[]): {
     tool_calls?: any[]
     tool_results?: Array<{ tool_call_id: string; content: string }>
 } {
-    if (typeof content === 'string') return { text: content }
+    if (typeof content === 'string') {
+        return { text: content }
+    }
 
     let text = ''
     const tool_calls: any[] = []
@@ -223,11 +226,15 @@ function anthropicContentToOpenAI(content: string | AnthropicContentBlock[]): {
                 },
             })
         } else if (block.type === 'tool_result') {
-            const resultText = typeof block.content === 'string'
-                ? block.content
-                : Array.isArray(block.content)
-                    ? block.content.filter((b: any) => b.type === 'text').map((b: any) => b.text ?? '').join('')
-                    : ''
+            const resultText =
+                typeof block.content === 'string'
+                    ? block.content
+                    : Array.isArray(block.content)
+                      ? block.content
+                            .filter((b: any) => b.type === 'text')
+                            .map((b: any) => b.text ?? '')
+                            .join('')
+                      : ''
             tool_results.push({ tool_call_id: block.tool_use_id ?? '', content: resultText })
         } else if (block.type === 'image') {
             // Images: include a placeholder text so context isn't lost
@@ -235,22 +242,26 @@ function anthropicContentToOpenAI(content: string | AnthropicContentBlock[]): {
         } else if (block.type === 'document') {
             // Documents: extract text if available
             const src = block.source
-            if (src?.type === 'text' && src.data) text += src.data
-            else if (src?.type === 'base64') text += '[document]'
+            if (src?.type === 'text' && src.data) {
+                text += src.data
+            } else if (src?.type === 'base64') {
+                text += '[document]'
+            }
         }
     }
 
-    return { text, tool_calls: tool_calls.length ? tool_calls : undefined, tool_results: tool_results.length ? tool_results : undefined }
+    return {
+        text,
+        tool_calls: tool_calls.length ? tool_calls : undefined,
+        tool_results: tool_results.length ? tool_results : undefined,
+    }
 }
 
 /**
  * Convert an array of Anthropic messages to the OpenAI message format
  * that buildKiroPayload() expects.
  */
-function anthropicMessagesToOpenAI(
-    messages: AnthropicMessage[],
-    systemPrompt?: string
-): OpenAIMessage[] {
+function anthropicMessagesToOpenAI(messages: AnthropicMessage[], systemPrompt?: string): OpenAIMessage[] {
     const result: OpenAIMessage[] = []
 
     if (systemPrompt) {
@@ -272,13 +283,17 @@ function anthropicMessagesToOpenAI(
                 for (const tr of tool_results) {
                     result.push({ role: 'tool', content: tr.content, tool_call_id: tr.tool_call_id })
                 }
-                if (text) result.push({ role: 'user', content: text })
+                if (text) {
+                    result.push({ role: 'user', content: text })
+                }
             } else {
                 result.push({ role: 'user', content: text })
             }
         } else if (m.role === 'assistant') {
             const msg: OpenAIMessage = { role: 'assistant', content: text }
-            if (tool_calls?.length) msg.tool_calls = tool_calls
+            if (tool_calls?.length) {
+                msg.tool_calls = tool_calls
+            }
             result.push(msg)
         }
     }
@@ -302,9 +317,16 @@ function anthropicToolsToOpenAI(tools: AnthropicTool[]): OpenAITool[] {
 
 /** Extract system prompt string from Anthropic system field */
 function extractSystemPrompt(system?: string | Array<{ type: string; text: string }>): string {
-    if (!system) return ''
-    if (typeof system === 'string') return system
-    return system.filter((b) => b.type === 'text').map((b) => b.text).join('\n')
+    if (!system) {
+        return ''
+    }
+    if (typeof system === 'string') {
+        return system
+    }
+    return system
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n')
 }
 
 // ── Error helpers ─────────────────────────────────────────────────────────────
@@ -315,8 +337,12 @@ function anthropicError(res: http.ServerResponse, status: number, type: string, 
 }
 
 function notSupported(res: http.ServerResponse, feature: string) {
-    anthropicError(res, 501, 'not_supported_error',
-        `${feature} requires Docker. Enable it in Amazon Q settings (amazonQ.anthropicServer.dockerEnabled) and ensure Docker is running.`)
+    anthropicError(
+        res,
+        501,
+        'not_supported_error',
+        `${feature} requires Docker. Enable it in Amazon Q settings (amazonQ.anthropicServer.dockerEnabled) and ensure Docker is running.`
+    )
 }
 
 // ── Core: execute one Anthropic messages request, return Anthropic Message ────
@@ -348,10 +374,16 @@ async function executeMessages(req: AnthropicMessagesRequest): Promise<any> {
 
     const conversationId = randomUUID()
     let profileArn: string | undefined
-    try { profileArn = AuthUtil.instance.regionProfileManager?.activeRegionProfile?.arn } catch { /* optional */ }
+    try {
+        profileArn = AuthUtil.instance.regionProfileManager?.activeRegionProfile?.arn
+    } catch {
+        /* optional */
+    }
 
     const payload = buildKiroPayload(oaiReq, conversationId, profileArn)
-    if (req.max_tokens) payload.conversationState.currentMessage.userInputMessage.maxTokens = req.max_tokens
+    if (req.max_tokens) {
+        payload.conversationState.currentMessage.userInputMessage.maxTokens = req.max_tokens
+    }
 
     // Use SDK-based streaming to get properly deserialized tool inputs
     const toolCalls: any[] = []
@@ -382,7 +414,9 @@ async function executeMessages(req: AnthropicMessagesRequest): Promise<any> {
 
     // Build Anthropic content blocks
     const contentBlocks: any[] = []
-    if (fullContent) contentBlocks.push({ type: 'text', text: fullContent })
+    if (fullContent) {
+        contentBlocks.push({ type: 'text', text: fullContent })
+    }
     for (const tc of toolCalls) {
         contentBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
     }
@@ -409,7 +443,11 @@ async function executeMessages(req: AnthropicMessagesRequest): Promise<any> {
 
 // ── POST /v1/messages ─────────────────────────────────────────────────────────
 
-async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerResponse, incomingHeaders: http.IncomingHttpHeaders) {
+async function handleMessages(
+    req: AnthropicMessagesRequest,
+    res: http.ServerResponse,
+    incomingHeaders: http.IncomingHttpHeaders
+) {
     const model = req.model ?? 'claude-sonnet-4.5'
     const systemPrompt = extractSystemPrompt(req.system)
     const openaiMessages = anthropicMessagesToOpenAI(req.messages, systemPrompt)
@@ -423,7 +461,12 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
     if (incomingSessionId) {
         const session = sessionStore.get(incomingSessionId)
         if (!session) {
-            anthropicError(res, 400, 'invalid_request_error', `Unknown session ID: ${incomingSessionId}. Start a new conversation without X-Session-Id.`)
+            anthropicError(
+                res,
+                400,
+                'invalid_request_error',
+                `Unknown session ID: ${incomingSessionId}. Start a new conversation without X-Session-Id.`
+            )
             return
         }
         const merged = sessionStore.append(incomingSessionId, openaiMessages, openaiTools)!
@@ -445,16 +488,26 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
     }
 
     const trimmed = trimMessages(effectiveMessages, model, prevState)
-    const oaiReq: OpenAIChatRequest = { model, messages: trimmed, tools: openaiTools, stream: req.stream, max_tokens: req.max_tokens }
+    const oaiReq: OpenAIChatRequest = {
+        model,
+        messages: trimmed,
+        tools: openaiTools,
+        stream: req.stream,
+        max_tokens: req.max_tokens,
+    }
 
     const conversationId = randomUUID()
     const msgId = `msg_${randomUUID().replace(/-/g, '').slice(0, 24)}`
 
     let profileArn: string | undefined
-    try { profileArn = AuthUtil.instance.regionProfileManager?.activeRegionProfile?.arn } catch {}
+    try {
+        profileArn = AuthUtil.instance.regionProfileManager?.activeRegionProfile?.arn
+    } catch {}
 
     const payload = buildKiroPayload(oaiReq, conversationId, profileArn)
-    if (req.max_tokens) payload.conversationState.currentMessage.userInputMessage.maxTokens = req.max_tokens
+    if (req.max_tokens) {
+        payload.conversationState.currentMessage.userInputMessage.maxTokens = req.max_tokens
+    }
 
     // ── Both streaming and non-streaming use SDK-based approach ──────────────
     // streamFromCWSDK uses the CodeWhispererStreaming SDK which properly
@@ -497,15 +550,20 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
     const assistantMsg: OpenAIMessage = { role: 'assistant', content: fullContent || null }
     if (toolCalls.length) {
         assistantMsg.tool_calls = toolCalls.map((tc) => ({
-            id: tc.id, type: 'function',
+            id: tc.id,
+            type: 'function',
             function: { name: tc.name, arguments: JSON.stringify(tc.input) },
         }))
     }
     sessionStore.append(sessionId, [assistantMsg])
 
     const contentBlocks: any[] = []
-    if (fullContent) contentBlocks.push({ type: 'text', text: fullContent })
-    for (const tc of toolCalls) contentBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+    if (fullContent) {
+        contentBlocks.push({ type: 'text', text: fullContent })
+    }
+    for (const tc of toolCalls) {
+        contentBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+    }
     const stopReason = toolCalls.length ? 'tool_use' : 'end_turn'
 
     if (req.stream) {
@@ -516,7 +574,7 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
         res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
+            Connection: 'keep-alive',
             'X-Session-Id': sessionId,
             'anthropic-version': '2023-06-01',
         })
@@ -527,21 +585,45 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
 
         sendEvent('message_start', {
             type: 'message_start',
-            message: { id: msgId, type: 'message', role: 'assistant', content: [], model, stop_reason: null, stop_sequence: null,
-                usage: { input_tokens: promptTokens, output_tokens: 0 } },
+            message: {
+                id: msgId,
+                type: 'message',
+                role: 'assistant',
+                content: [],
+                model,
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: promptTokens, output_tokens: 0 },
+            },
         })
 
         let blockIndex = 0
         if (fullContent) {
-            sendEvent('content_block_start', { type: 'content_block_start', index: blockIndex, content_block: { type: 'text', text: '' } })
-            sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text: fullContent } })
+            sendEvent('content_block_start', {
+                type: 'content_block_start',
+                index: blockIndex,
+                content_block: { type: 'text', text: '' },
+            })
+            sendEvent('content_block_delta', {
+                type: 'content_block_delta',
+                index: blockIndex,
+                delta: { type: 'text_delta', text: fullContent },
+            })
             sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex })
             blockIndex++
         }
         for (const tc of toolCalls) {
             const inputJson = JSON.stringify(tc.input)
-            sendEvent('content_block_start', { type: 'content_block_start', index: blockIndex, content_block: { type: 'tool_use', id: tc.id, name: tc.name, input: {} } })
-            sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIndex, delta: { type: 'input_json_delta', partial_json: inputJson } })
+            sendEvent('content_block_start', {
+                type: 'content_block_start',
+                index: blockIndex,
+                content_block: { type: 'tool_use', id: tc.id, name: tc.name, input: {} },
+            })
+            sendEvent('content_block_delta', {
+                type: 'content_block_delta',
+                index: blockIndex,
+                delta: { type: 'input_json_delta', partial_json: inputJson },
+            })
             sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex })
             blockIndex++
         }
@@ -561,11 +643,23 @@ async function handleMessages(req: AnthropicMessagesRequest, res: http.ServerRes
             'anthropic-version': '2023-06-01',
             'request-id': randomUUID(),
         })
-        res.end(JSON.stringify({
-            id: msgId, type: 'message', role: 'assistant', content: contentBlocks, model,
-            stop_reason: stopReason, stop_sequence: null,
-            usage: { input_tokens: promptTokens, output_tokens: completionTokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        }))
+        res.end(
+            JSON.stringify({
+                id: msgId,
+                type: 'message',
+                role: 'assistant',
+                content: contentBlocks,
+                model,
+                stop_reason: stopReason,
+                stop_sequence: null,
+                usage: {
+                    input_tokens: promptTokens,
+                    output_tokens: completionTokens,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+            })
+        )
     }
 }
 
@@ -576,7 +670,9 @@ function handleCountTokens(req: AnthropicMessagesRequest, res: http.ServerRespon
     const systemPrompt = extractSystemPrompt(req.system)
     const openaiMessages = anthropicMessagesToOpenAI(req.messages, systemPrompt)
     let totalChars = systemPrompt.length
-    for (const m of openaiMessages) totalChars += extractText(m.content).length
+    for (const m of openaiMessages) {
+        totalChars += extractText(m.content).length
+    }
     const inputTokens = Math.ceil(totalChars / 4)
     res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
     res.end(JSON.stringify({ input_tokens: inputTokens }))
@@ -600,7 +696,9 @@ function batchToResponse(b: StoredBatch) {
 
 async function processBatch(batchId: string, requests: BatchRequest[]) {
     const batch = batchStore.get(batchId)
-    if (!batch) return
+    if (!batch) {
+        return
+    }
 
     for (const req of requests) {
         if (batch.cancel_requested) {
@@ -614,7 +712,10 @@ async function processBatch(batchId: string, requests: BatchRequest[]) {
             batch.results.push({ custom_id: req.custom_id, result: { type: 'succeeded', message } })
             batch.request_counts.succeeded++
         } catch (err: any) {
-            batch.results.push({ custom_id: req.custom_id, result: { type: 'errored', error: { type: 'api_error', message: err.message } } })
+            batch.results.push({
+                custom_id: req.custom_id,
+                result: { type: 'errored', error: { type: 'api_error', message: err.message } },
+            })
             batch.request_counts.errored++
         }
         batch.request_counts.processing--
@@ -629,14 +730,20 @@ function handleBatches(method: string, pathParts: string[], body: any, res: http
     if (method === 'POST' && !batchId) {
         // Create batch
         const requests: BatchRequest[] = body.requests ?? []
-        if (!requests.length) { anthropicError(res, 400, 'invalid_request_error', 'requests array is required'); return }
+        if (!requests.length) {
+            anthropicError(res, 400, 'invalid_request_error', 'requests array is required')
+            return
+        }
         const id = `msgbatch_${randomUUID().replace(/-/g, '').slice(0, 24)}`
         const now = Math.floor(Date.now() / 1000)
         const batch: StoredBatch = {
-            id, created_at: now, expires_at: now + 86400,
+            id,
+            created_at: now,
+            expires_at: now + 86400,
             status: 'in_progress',
             request_counts: { processing: requests.length, succeeded: 0, errored: 0, canceled: 0, expired: 0 },
-            results: [], cancel_requested: false,
+            results: [],
+            cancel_requested: false,
         }
         batchStore.set(id, batch)
         // Process asynchronously
@@ -650,13 +757,26 @@ function handleBatches(method: string, pathParts: string[], body: any, res: http
         // List batches
         const data = [...batchStore.values()].map(batchToResponse)
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
-        res.end(JSON.stringify({ data, has_more: false, first_id: data[0]?.id ?? null, last_id: data[data.length - 1]?.id ?? null }))
+        res.end(
+            JSON.stringify({
+                data,
+                has_more: false,
+                first_id: data[0]?.id ?? null,
+                last_id: data[data.length - 1]?.id ?? null,
+            })
+        )
         return
     }
 
-    if (!batchId) { anthropicError(res, 404, 'not_found_error', 'Not found'); return }
+    if (!batchId) {
+        anthropicError(res, 404, 'not_found_error', 'Not found')
+        return
+    }
     const batch = batchStore.get(batchId)
-    if (!batch) { anthropicError(res, 404, 'not_found_error', `Batch ${batchId} not found`); return }
+    if (!batch) {
+        anthropicError(res, 404, 'not_found_error', `Batch ${batchId} not found`)
+        return
+    }
 
     if (method === 'GET' && !subAction) {
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
@@ -666,14 +786,18 @@ function handleBatches(method: string, pathParts: string[], body: any, res: http
 
     if (method === 'GET' && subAction === 'results') {
         res.writeHead(200, { 'Content-Type': 'application/x-jsonl', 'anthropic-version': '2023-06-01' })
-        for (const r of batch.results) res.write(JSON.stringify(r) + '\n')
+        for (const r of batch.results) {
+            res.write(JSON.stringify(r) + '\n')
+        }
         res.end()
         return
     }
 
     if (method === 'POST' && subAction === 'cancel') {
         batch.cancel_requested = true
-        if (batch.status === 'in_progress') batch.status = 'canceling'
+        if (batch.status === 'in_progress') {
+            batch.status = 'canceling'
+        }
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
         res.end(JSON.stringify(batchToResponse(batch)))
         return
@@ -692,7 +816,15 @@ function handleBatches(method: string, pathParts: string[], body: any, res: http
 // ── Files API ─────────────────────────────────────────────────────────────────
 
 function fileToMeta(f: StoredFile) {
-    return { id: f.id, object: 'file', filename: f.filename, purpose: f.purpose, content_type: f.content_type, size: f.size, created_at: f.created_at }
+    return {
+        id: f.id,
+        object: 'file',
+        filename: f.filename,
+        purpose: f.purpose,
+        content_type: f.content_type,
+        size: f.size,
+        created_at: f.created_at,
+    }
 }
 
 async function handleFiles(method: string, pathParts: string[], req: http.IncomingMessage, res: http.ServerResponse) {
@@ -703,17 +835,29 @@ async function handleFiles(method: string, pathParts: string[], req: http.Incomi
         // Upload file — multipart/form-data
         const ct = req.headers['content-type'] ?? ''
         const boundaryMatch = ct.match(/boundary=([^\s;]+)/)
-        if (!boundaryMatch) { anthropicError(res, 400, 'invalid_request_error', 'Expected multipart/form-data'); return }
+        if (!boundaryMatch) {
+            anthropicError(res, 400, 'invalid_request_error', 'Expected multipart/form-data')
+            return
+        }
         const chunks: Buffer[] = []
-        for await (const c of req) chunks.push(c as Buffer)
+        for await (const c of req) {
+            chunks.push(c as Buffer)
+        }
         const body = Buffer.concat(chunks)
         const { fields, files } = parseMultipart(body, boundaryMatch[1])
-        if (!files.length) { anthropicError(res, 400, 'invalid_request_error', 'No file in request'); return }
+        if (!files.length) {
+            anthropicError(res, 400, 'invalid_request_error', 'No file in request')
+            return
+        }
         const f = files[0]
         const id = `file_${randomUUID().replace(/-/g, '').slice(0, 24)}`
         const stored: StoredFile = {
-            id, filename: f.filename, purpose: fields.purpose ?? 'assistants',
-            content_type: f.contentType, size: f.data.length, data: f.data,
+            id,
+            filename: f.filename,
+            purpose: fields.purpose ?? 'assistants',
+            content_type: f.contentType,
+            size: f.data.length,
+            data: f.data,
             created_at: Math.floor(Date.now() / 1000),
         }
         fileStore.set(id, stored)
@@ -729,9 +873,15 @@ async function handleFiles(method: string, pathParts: string[], req: http.Incomi
         return
     }
 
-    if (!fileId) { anthropicError(res, 404, 'not_found_error', 'Not found'); return }
+    if (!fileId) {
+        anthropicError(res, 404, 'not_found_error', 'Not found')
+        return
+    }
     const file = fileStore.get(fileId)
-    if (!file) { anthropicError(res, 404, 'not_found_error', `File ${fileId} not found`); return }
+    if (!file) {
+        anthropicError(res, 404, 'not_found_error', `File ${fileId} not found`)
+        return
+    }
 
     if (method === 'GET' && !subAction) {
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
@@ -764,19 +914,38 @@ async function handleModels(method: string, pathParts: string[], res: http.Serve
 
     if (method === 'GET' && !modelId) {
         const data = models.map((m) => ({
-            id: m.modelId, type: 'model', display_name: m.modelName ?? m.modelId,
+            id: m.modelId,
+            type: 'model',
+            display_name: m.modelName ?? m.modelId,
             created_at: new Date(created * 1000).toISOString(),
         }))
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
-        res.end(JSON.stringify({ data, has_more: false, first_id: data[0]?.id ?? null, last_id: data[data.length - 1]?.id ?? null }))
+        res.end(
+            JSON.stringify({
+                data,
+                has_more: false,
+                first_id: data[0]?.id ?? null,
+                last_id: data[data.length - 1]?.id ?? null,
+            })
+        )
         return
     }
 
     if (method === 'GET' && modelId) {
         const m = models.find((x) => x.modelId === modelId)
-        if (!m) { anthropicError(res, 404, 'not_found_error', `Model ${modelId} not found`); return }
+        if (!m) {
+            anthropicError(res, 404, 'not_found_error', `Model ${modelId} not found`)
+            return
+        }
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
-        res.end(JSON.stringify({ id: m.modelId, type: 'model', display_name: m.modelName ?? m.modelId, created_at: new Date(created * 1000).toISOString() }))
+        res.end(
+            JSON.stringify({
+                id: m.modelId,
+                type: 'model',
+                display_name: m.modelName ?? m.modelId,
+                created_at: new Date(created * 1000).toISOString(),
+            })
+        )
         return
     }
 
@@ -790,9 +959,19 @@ function handleSkills(method: string, pathParts: string[], body: any, res: http.
     const now = Math.floor(Date.now() / 1000)
 
     if (method === 'POST' && !skillId) {
-        if (!body.name || !body.input_schema) { anthropicError(res, 400, 'invalid_request_error', 'name and input_schema required'); return }
+        if (!body.name || !body.input_schema) {
+            anthropicError(res, 400, 'invalid_request_error', 'name and input_schema required')
+            return
+        }
         const id = `skill_${randomUUID().replace(/-/g, '').slice(0, 24)}`
-        const skill: StoredSkill = { id, name: body.name, description: body.description, input_schema: body.input_schema, created_at: now, updated_at: now }
+        const skill: StoredSkill = {
+            id,
+            name: body.name,
+            description: body.description,
+            input_schema: body.input_schema,
+            created_at: now,
+            updated_at: now,
+        }
         skillStore.set(id, skill)
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
         res.end(JSON.stringify(skill))
@@ -804,15 +983,37 @@ function handleSkills(method: string, pathParts: string[], body: any, res: http.
         res.end(JSON.stringify({ data, has_more: false }))
         return
     }
-    if (!skillId) { anthropicError(res, 404, 'not_found_error', 'Not found'); return }
-    const skill = skillStore.get(skillId)
-    if (!skill) { anthropicError(res, 404, 'not_found_error', `Skill ${skillId} not found`); return }
-    if (method === 'GET') { res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify(skill)); return }
-    if (method === 'PUT') {
-        Object.assign(skill, { name: body.name ?? skill.name, description: body.description ?? skill.description, input_schema: body.input_schema ?? skill.input_schema, updated_at: now })
-        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify(skill)); return
+    if (!skillId) {
+        anthropicError(res, 404, 'not_found_error', 'Not found')
+        return
     }
-    if (method === 'DELETE') { skillStore.delete(skillId); res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify({ id: skillId, deleted: true })); return }
+    const skill = skillStore.get(skillId)
+    if (!skill) {
+        anthropicError(res, 404, 'not_found_error', `Skill ${skillId} not found`)
+        return
+    }
+    if (method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify(skill))
+        return
+    }
+    if (method === 'PUT') {
+        Object.assign(skill, {
+            name: body.name ?? skill.name,
+            description: body.description ?? skill.description,
+            input_schema: body.input_schema ?? skill.input_schema,
+            updated_at: now,
+        })
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify(skill))
+        return
+    }
+    if (method === 'DELETE') {
+        skillStore.delete(skillId)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify({ id: skillId, deleted: true }))
+        return
+    }
     anthropicError(res, 404, 'not_found_error', 'Not found')
 }
 
@@ -823,25 +1024,65 @@ function handleAgents(method: string, pathParts: string[], body: any, res: http.
     const now = Math.floor(Date.now() / 1000)
 
     if (method === 'POST' && !agentId) {
-        if (!body.name || !body.model) { anthropicError(res, 400, 'invalid_request_error', 'name and model required'); return }
+        if (!body.name || !body.model) {
+            anthropicError(res, 400, 'invalid_request_error', 'name and model required')
+            return
+        }
         const id = `agent_${randomUUID().replace(/-/g, '').slice(0, 24)}`
-        const agent: StoredAgent = { id, name: body.name, description: body.description, model: body.model, system_prompt: body.system_prompt, skill_ids: body.skill_ids ?? [], created_at: now, updated_at: now }
+        const agent: StoredAgent = {
+            id,
+            name: body.name,
+            description: body.description,
+            model: body.model,
+            system_prompt: body.system_prompt,
+            skill_ids: body.skill_ids ?? [],
+            created_at: now,
+            updated_at: now,
+        }
         agentStore.set(id, agent)
-        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify(agent)); return
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify(agent))
+        return
     }
     if (method === 'GET' && !agentId) {
         const data = [...agentStore.values()]
-        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify({ data, has_more: false })); return
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify({ data, has_more: false }))
+        return
     }
-    if (!agentId) { anthropicError(res, 404, 'not_found_error', 'Not found'); return }
+    if (!agentId) {
+        anthropicError(res, 404, 'not_found_error', 'Not found')
+        return
+    }
     const agent = agentStore.get(agentId)
-    if (!agent) { anthropicError(res, 404, 'not_found_error', `Agent ${agentId} not found`); return }
-    if (method === 'GET') { res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify(agent)); return }
-    if (method === 'PUT') {
-        Object.assign(agent, { name: body.name ?? agent.name, description: body.description ?? agent.description, model: body.model ?? agent.model, system_prompt: body.system_prompt ?? agent.system_prompt, skill_ids: body.skill_ids ?? agent.skill_ids, updated_at: now })
-        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify(agent)); return
+    if (!agent) {
+        anthropicError(res, 404, 'not_found_error', `Agent ${agentId} not found`)
+        return
     }
-    if (method === 'DELETE') { agentStore.delete(agentId); res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify({ id: agentId, deleted: true })); return }
+    if (method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify(agent))
+        return
+    }
+    if (method === 'PUT') {
+        Object.assign(agent, {
+            name: body.name ?? agent.name,
+            description: body.description ?? agent.description,
+            model: body.model ?? agent.model,
+            system_prompt: body.system_prompt ?? agent.system_prompt,
+            skill_ids: body.skill_ids ?? agent.skill_ids,
+            updated_at: now,
+        })
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify(agent))
+        return
+    }
+    if (method === 'DELETE') {
+        agentStore.delete(agentId)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify({ id: agentId, deleted: true }))
+        return
+    }
     anthropicError(res, 404, 'not_found_error', 'Not found')
 }
 
@@ -852,30 +1093,67 @@ function handleEnvironments(method: string, pathParts: string[], body: any, res:
     const now = Math.floor(Date.now() / 1000)
 
     if (method === 'POST' && !envId) {
-        if (!body.name) { anthropicError(res, 400, 'invalid_request_error', 'name required'); return }
+        if (!body.name) {
+            anthropicError(res, 400, 'invalid_request_error', 'name required')
+            return
+        }
         const id = `env_${randomUUID().replace(/-/g, '').slice(0, 24)}`
         const env: StoredEnvironment = {
-            id, name: body.name,
-            image: body.image ?? vscode.workspace.getConfiguration('amazonQ').get<string>('anthropicServer.defaultEnvironmentImage', 'ubuntu:24.04'),
-            memory_mb: body.memory_mb ?? vscode.workspace.getConfiguration('amazonQ').get<number>('anthropicServer.containerMemoryMb', 512),
-            created_at: now, updated_at: now,
+            id,
+            name: body.name,
+            image:
+                body.image ??
+                vscode.workspace
+                    .getConfiguration('amazonQ')
+                    .get<string>('anthropicServer.defaultEnvironmentImage', 'ubuntu:24.04'),
+            memory_mb:
+                body.memory_mb ??
+                vscode.workspace.getConfiguration('amazonQ').get<number>('anthropicServer.containerMemoryMb', 512),
+            created_at: now,
+            updated_at: now,
         }
         environmentStore.set(id, env)
-        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify(env)); return
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify(env))
+        return
     }
     if (method === 'GET' && !envId) {
         const data = [...environmentStore.values()]
-        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify({ data, has_more: false })); return
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify({ data, has_more: false }))
+        return
     }
-    if (!envId) { anthropicError(res, 404, 'not_found_error', 'Not found'); return }
+    if (!envId) {
+        anthropicError(res, 404, 'not_found_error', 'Not found')
+        return
+    }
     const env = environmentStore.get(envId)
-    if (!env) { anthropicError(res, 404, 'not_found_error', `Environment ${envId} not found`); return }
-    if (method === 'GET') { res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify(env)); return }
-    if (method === 'PUT') {
-        Object.assign(env, { name: body.name ?? env.name, image: body.image ?? env.image, memory_mb: body.memory_mb ?? env.memory_mb, updated_at: now })
-        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify(env)); return
+    if (!env) {
+        anthropicError(res, 404, 'not_found_error', `Environment ${envId} not found`)
+        return
     }
-    if (method === 'DELETE') { environmentStore.delete(envId); res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify({ id: envId, deleted: true })); return }
+    if (method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify(env))
+        return
+    }
+    if (method === 'PUT') {
+        Object.assign(env, {
+            name: body.name ?? env.name,
+            image: body.image ?? env.image,
+            memory_mb: body.memory_mb ?? env.memory_mb,
+            updated_at: now,
+        })
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify(env))
+        return
+    }
+    if (method === 'DELETE') {
+        environmentStore.delete(envId)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify({ id: envId, deleted: true }))
+        return
+    }
     anthropicError(res, 404, 'not_found_error', 'Not found')
 }
 
@@ -892,23 +1170,36 @@ async function isDockerAvailable(): Promise<boolean> {
 
 async function startContainer(image: string, memoryMb: number, sessionId: string): Promise<string> {
     const { stdout } = await execFileAsync('docker', [
-        'run', '-d', '--rm',
+        'run',
+        '-d',
+        '--rm',
         `--memory=${memoryMb}m`,
-        '--label', `anthropic-session=${sessionId}`,
+        '--label',
+        `anthropic-session=${sessionId}`,
         image,
-        'sleep', 'infinity',
+        'sleep',
+        'infinity',
     ])
     return stdout.trim()
 }
 
 async function stopContainer(containerId: string): Promise<void> {
-    try { await execFileAsync('docker', ['rm', '-f', containerId]) } catch { /* ignore */ }
+    try {
+        await execFileAsync('docker', ['rm', '-f', containerId])
+    } catch {
+        /* ignore */
+    }
 }
 
 /** Execute a shell command inside a running container. Reserved for future tool-execution support. */
-export async function execInContainer(containerId: string, command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+export async function execInContainer(
+    containerId: string,
+    command: string
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     try {
-        const { stdout, stderr } = await execFileAsync('docker', ['exec', containerId, 'sh', '-c', command], { timeout: 30_000 })
+        const { stdout, stderr } = await execFileAsync('docker', ['exec', containerId, 'sh', '-c', command], {
+            timeout: 30_000,
+        })
         return { stdout, stderr, exitCode: 0 }
     } catch (err: any) {
         return { stdout: err.stdout ?? '', stderr: err.stderr ?? err.message, exitCode: err.code ?? 1 }
@@ -917,7 +1208,13 @@ export async function execInContainer(containerId: string, command: string): Pro
 
 // ── Sessions API ──────────────────────────────────────────────────────────────
 
-async function handleSessions(method: string, pathParts: string[], body: any, req: http.IncomingMessage, res: http.ServerResponse) {
+async function handleSessions(
+    method: string,
+    pathParts: string[],
+    body: any,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+) {
     const cfg = vscode.workspace.getConfiguration('amazonQ')
     const dockerEnabled = cfg.get<boolean>('anthropicServer.dockerEnabled', false)
 
@@ -925,7 +1222,10 @@ async function handleSessions(method: string, pathParts: string[], body: any, re
     const subAction = pathParts[4] // stream
 
     if (method === 'POST' && !sessionId) {
-        if (!dockerEnabled) { notSupported(res, 'Sessions'); return }
+        if (!dockerEnabled) {
+            notSupported(res, 'Sessions')
+            return
+        }
 
         const agentId: string | undefined = body.agent_id
         const envId: string | undefined = body.environment_id
@@ -947,15 +1247,24 @@ async function handleSessions(method: string, pathParts: string[], body: any, re
         if (agent?.skill_ids?.length) {
             for (const sid of agent.skill_ids) {
                 const skill = skillStore.get(sid)
-                if (skill) tools.push({ type: 'function', function: { name: skill.name, description: skill.description, parameters: skill.input_schema } })
+                if (skill) {
+                    tools.push({
+                        type: 'function',
+                        function: { name: skill.name, description: skill.description, parameters: skill.input_schema },
+                    })
+                }
             }
         }
 
         const session: StoredSession = {
-            id, agent_id: agentId, environment_id: envId,
-            status: 'created', created_at: Math.floor(Date.now() / 1000),
+            id,
+            agent_id: agentId,
+            environment_id: envId,
+            status: 'created',
+            created_at: Math.floor(Date.now() / 1000),
             messages: agent?.system_prompt ? [{ role: 'system', content: agent.system_prompt }] : [],
-            tools, sseClients: [],
+            tools,
+            sseClients: [],
         }
         sessionMap.set(id, session)
 
@@ -969,46 +1278,93 @@ async function handleSessions(method: string, pathParts: string[], body: any, re
         }
 
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
-        res.end(JSON.stringify({ id: session.id, status: session.status, agent_id: agentId, environment_id: envId, created_at: session.created_at }))
+        res.end(
+            JSON.stringify({
+                id: session.id,
+                status: session.status,
+                agent_id: agentId,
+                environment_id: envId,
+                created_at: session.created_at,
+            })
+        )
         return
     }
 
     if (method === 'GET' && !sessionId) {
-        if (!dockerEnabled) { notSupported(res, 'Sessions'); return }
-        const data = [...sessionMap.values()].map((s) => ({ id: s.id, status: s.status, agent_id: s.agent_id, environment_id: s.environment_id, created_at: s.created_at }))
-        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }); res.end(JSON.stringify({ data, has_more: false })); return
+        if (!dockerEnabled) {
+            notSupported(res, 'Sessions')
+            return
+        }
+        const data = [...sessionMap.values()].map((s) => ({
+            id: s.id,
+            status: s.status,
+            agent_id: s.agent_id,
+            environment_id: s.environment_id,
+            created_at: s.created_at,
+        }))
+        res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
+        res.end(JSON.stringify({ data, has_more: false }))
+        return
     }
 
-    if (!sessionId) { anthropicError(res, 404, 'not_found_error', 'Not found'); return }
+    if (!sessionId) {
+        anthropicError(res, 404, 'not_found_error', 'Not found')
+        return
+    }
 
-    if (!dockerEnabled) { notSupported(res, 'Sessions'); return }
+    if (!dockerEnabled) {
+        notSupported(res, 'Sessions')
+        return
+    }
 
     const session = sessionMap.get(sessionId)
-    if (!session) { anthropicError(res, 404, 'not_found_error', `Session ${sessionId} not found`); return }
+    if (!session) {
+        anthropicError(res, 404, 'not_found_error', `Session ${sessionId} not found`)
+        return
+    }
 
     if (method === 'GET' && !subAction) {
         res.writeHead(200, { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' })
-        res.end(JSON.stringify({ id: session.id, status: session.status, agent_id: session.agent_id, environment_id: session.environment_id, created_at: session.created_at }))
+        res.end(
+            JSON.stringify({
+                id: session.id,
+                status: session.status,
+                agent_id: session.agent_id,
+                environment_id: session.environment_id,
+                created_at: session.created_at,
+            })
+        )
         return
     }
 
     if (method === 'GET' && subAction === 'stream') {
         // SSE stream for session events
-        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'anthropic-version': '2023-06-01' })
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+            'anthropic-version': '2023-06-01',
+        })
         session.sseClients.push(res)
         req.on('close', () => {
             session.sseClients = session.sseClients.filter((c) => c !== res)
         })
         // Send initial status
-        res.write(`event: session_status\ndata: ${JSON.stringify({ type: 'session_status', status: session.status })}\n\n`)
+        res.write(
+            `event: session_status\ndata: ${JSON.stringify({ type: 'session_status', status: session.status })}\n\n`
+        )
         return
     }
 
     if (method === 'DELETE' && !subAction) {
-        if (session.container_id) await stopContainer(session.container_id)
+        if (session.container_id) {
+            await stopContainer(session.container_id)
+        }
         session.status = 'stopped'
         for (const client of session.sseClients) {
-            client.write(`event: session_status\ndata: ${JSON.stringify({ type: 'session_status', status: 'stopped' })}\n\n`)
+            client.write(
+                `event: session_status\ndata: ${JSON.stringify({ type: 'session_status', status: 'stopped' })}\n\n`
+            )
             client.end()
         }
         sessionMap.delete(sessionId)
@@ -1027,25 +1383,43 @@ export class AnthropicCompatServer {
     private _port: number
     private _retryTimer: ReturnType<typeof setTimeout> | undefined
 
-    constructor(port = 61823) { this._port = port }
-    get port() { return this._port }
-    get isRunning() { return !!this.server }
+    constructor(port = 61823) {
+        this._port = port
+    }
+    get port() {
+        return this._port
+    }
+    get isRunning() {
+        return !!this.server
+    }
 
     /** Cancel any pending port-retry timer without stopping the server. */
     cancelRetry() {
-        if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = undefined }
+        if (this._retryTimer) {
+            clearTimeout(this._retryTimer)
+            this._retryTimer = undefined
+        }
     }
 
     async start(): Promise<void> {
-        if (this.server) return
+        if (this.server) {
+            return
+        }
         this.cancelRetry()
 
         const srv = http.createServer(async (req, res) => {
             res.setHeader('Access-Control-Allow-Origin', '*')
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, X-Session-Id')
+            res.setHeader(
+                'Access-Control-Allow-Headers',
+                'Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, X-Session-Id'
+            )
             res.setHeader('Access-Control-Expose-Headers', 'X-Session-Id, anthropic-version, request-id')
-            if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
+            if (req.method === 'OPTIONS') {
+                res.writeHead(204)
+                res.end()
+                return
+            }
 
             const url = new URL(req.url ?? '/', `http://127.0.0.1:${this._port}`)
             const pathname = url.pathname
@@ -1056,21 +1430,37 @@ export class AnthropicCompatServer {
             try {
                 // ── /v1/messages/count_tokens ─────────────────────────────────
                 if (pathname === '/v1/messages/count_tokens' && method === 'POST') {
-                    if (!AuthUtil.instance.isConnected()) { anthropicError(res, 401, 'authentication_error', 'Not authenticated with Amazon Q'); return }
+                    if (!AuthUtil.instance.isConnected()) {
+                        anthropicError(res, 401, 'authentication_error', 'Not authenticated with Amazon Q')
+                        return
+                    }
                     const raw = await readBody(req)
                     let parsed: AnthropicMessagesRequest
-                    try { parsed = JSON.parse(raw) } catch { anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON'); return }
+                    try {
+                        parsed = JSON.parse(raw)
+                    } catch {
+                        anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON')
+                        return
+                    }
                     handleCountTokens(parsed, res)
                     return
                 }
 
                 // ── /v1/messages/batches/* ────────────────────────────────────
                 if (pathname.startsWith('/v1/messages/batches')) {
-                    if (!AuthUtil.instance.isConnected()) { anthropicError(res, 401, 'authentication_error', 'Not authenticated with Amazon Q'); return }
+                    if (!AuthUtil.instance.isConnected()) {
+                        anthropicError(res, 401, 'authentication_error', 'Not authenticated with Amazon Q')
+                        return
+                    }
                     let body: any = {}
                     if (method === 'POST') {
                         const raw = await readBody(req)
-                        try { body = JSON.parse(raw) } catch { anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON'); return }
+                        try {
+                            body = JSON.parse(raw)
+                        } catch {
+                            anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON')
+                            return
+                        }
                     }
                     handleBatches(method, parts, body, res)
                     return
@@ -1078,12 +1468,26 @@ export class AnthropicCompatServer {
 
                 // ── /v1/messages ──────────────────────────────────────────────
                 if (pathname === '/v1/messages' && method === 'POST') {
-                    if (!AuthUtil.instance.isConnected()) { anthropicError(res, 401, 'authentication_error', 'Not authenticated with Amazon Q'); return }
+                    if (!AuthUtil.instance.isConnected()) {
+                        anthropicError(res, 401, 'authentication_error', 'Not authenticated with Amazon Q')
+                        return
+                    }
                     const raw = await readBody(req)
                     let parsed: AnthropicMessagesRequest
-                    try { parsed = JSON.parse(raw) } catch { anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON'); return }
-                    if (!parsed.messages?.length) { anthropicError(res, 400, 'invalid_request_error', 'messages required'); return }
-                    if (!parsed.max_tokens) { anthropicError(res, 400, 'invalid_request_error', 'max_tokens required'); return }
+                    try {
+                        parsed = JSON.parse(raw)
+                    } catch {
+                        anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON')
+                        return
+                    }
+                    if (!parsed.messages?.length) {
+                        anthropicError(res, 400, 'invalid_request_error', 'messages required')
+                        return
+                    }
+                    if (!parsed.max_tokens) {
+                        anthropicError(res, 400, 'invalid_request_error', 'max_tokens required')
+                        return
+                    }
                     await handleMessages(parsed, res, req.headers)
                     return
                 }
@@ -1105,7 +1509,12 @@ export class AnthropicCompatServer {
                     let body: any = {}
                     if (method === 'POST' || method === 'PUT') {
                         const raw = await readBody(req)
-                        try { body = JSON.parse(raw) } catch { anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON'); return }
+                        try {
+                            body = JSON.parse(raw)
+                        } catch {
+                            anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON')
+                            return
+                        }
                     }
                     handleSkills(method, parts, body, res)
                     return
@@ -1116,7 +1525,12 @@ export class AnthropicCompatServer {
                     let body: any = {}
                     if (method === 'POST' || method === 'PUT') {
                         const raw = await readBody(req)
-                        try { body = JSON.parse(raw) } catch { anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON'); return }
+                        try {
+                            body = JSON.parse(raw)
+                        } catch {
+                            anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON')
+                            return
+                        }
                     }
                     handleAgents(method, parts, body, res)
                     return
@@ -1127,7 +1541,12 @@ export class AnthropicCompatServer {
                     let body: any = {}
                     if (method === 'POST' || method === 'PUT') {
                         const raw = await readBody(req)
-                        try { body = JSON.parse(raw) } catch { anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON'); return }
+                        try {
+                            body = JSON.parse(raw)
+                        } catch {
+                            anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON')
+                            return
+                        }
                     }
                     handleEnvironments(method, parts, body, res)
                     return
@@ -1138,7 +1557,12 @@ export class AnthropicCompatServer {
                     let body: any = {}
                     if (method === 'POST') {
                         const raw = await readBody(req)
-                        try { body = JSON.parse(raw) } catch { anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON'); return }
+                        try {
+                            body = JSON.parse(raw)
+                        } catch {
+                            anthropicError(res, 400, 'invalid_request_error', 'Invalid JSON')
+                            return
+                        }
                     }
                     await handleSessions(method, parts, body, req, res)
                     return
@@ -1148,7 +1572,9 @@ export class AnthropicCompatServer {
                 res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: 'Not found' } }))
             } catch (err: any) {
                 log.error('anthropicServer: unhandled error: %s', err)
-                if (!res.headersSent) anthropicError(res, 500, 'api_error', err.message ?? 'Internal error')
+                if (!res.headersSent) {
+                    anthropicError(res, 500, 'api_error', err.message ?? 'Internal error')
+                }
             }
         })
 
@@ -1167,19 +1593,25 @@ export class AnthropicCompatServer {
                     if (retryEnabled) {
                         log.warn('Anthropic server: port %d busy — will retry in %ds', this._port, retryIntervalSec)
                         pushAnthropicSettingsState(false, this._port)
-                        void vscode.window.showWarningMessage(
-                            `Anthropic server: port ${this._port} is busy. Retrying in ${retryIntervalSec}s…`,
-                            'Stop retrying'
-                        ).then((choice) => {
-                            if (choice === 'Stop retrying') this.cancelRetry()
-                        })
+                        void vscode.window
+                            .showWarningMessage(
+                                `Anthropic server: port ${this._port} is busy. Retrying in ${retryIntervalSec}s…`,
+                                'Stop retrying'
+                            )
+                            .then((choice) => {
+                                if (choice === 'Stop retrying') {
+                                    this.cancelRetry()
+                                }
+                            })
                         this._retryTimer = setTimeout(() => {
                             this._retryTimer = undefined
-                            this.start().then(() => {
-                                pushAnthropicSettingsState(true, this._port)
-                            }).catch((e) => {
-                                log.error('Anthropic server retry failed: %s', e)
-                            })
+                            this.start()
+                                .then(() => {
+                                    pushAnthropicSettingsState(true, this._port)
+                                })
+                                .catch((e) => {
+                                    log.error('Anthropic server retry failed: %s', e)
+                                })
                         }, retryIntervalSec * 1000)
                         // Resolve (not reject) so the caller doesn't see an error — retrying silently
                         resolve()
@@ -1200,12 +1632,21 @@ export class AnthropicCompatServer {
     stop(): Promise<void> {
         this.cancelRetry()
         return new Promise((resolve) => {
-            if (!this.server) { resolve(); return }
+            if (!this.server) {
+                resolve()
+                return
+            }
             // Stop all active Docker sessions
             for (const session of sessionMap.values()) {
-                if (session.container_id) void stopContainer(session.container_id)
+                if (session.container_id) {
+                    void stopContainer(session.container_id)
+                }
             }
-            this.server.close(() => { this.server = undefined; log.info('Anthropic-compatible server stopped'); resolve() })
+            this.server.close(() => {
+                this.server = undefined
+                log.info('Anthropic-compatible server stopped')
+                resolve()
+            })
         })
     }
 }
@@ -1229,7 +1670,7 @@ function buildAnthropicSettingsHtml(
     const toggleLabel = running ? 'Stop server' : 'Start server'
     const toggleClass = running ? 'btn-stop' : 'btn-start'
 
-    return /* html */`<!DOCTYPE html>
+    return /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1422,7 +1863,9 @@ export function activateAnthropicServer(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('aws.amazonq.anthropicServer.start', async () => {
             // Re-read config so a port change saved via VS Code settings takes effect
             if (!anthropicServerInstance?.isRunning) {
-                const latestPort = vscode.workspace.getConfiguration('amazonQ').get<number>('anthropicServer.port', 61823)
+                const latestPort = vscode.workspace
+                    .getConfiguration('amazonQ')
+                    .get<number>('anthropicServer.port', 61823)
                 if (latestPort !== anthropicServerInstance?.port) {
                     await anthropicServerInstance?.stop()
                     anthropicServerInstance = new AnthropicCompatServer(latestPort)
@@ -1431,8 +1874,12 @@ export function activateAnthropicServer(context: vscode.ExtensionContext) {
             try {
                 await anthropicServerInstance!.start()
                 pushAnthropicSettingsState(true, anthropicServerInstance!.port)
-                void vscode.window.showInformationMessage(`Amazon Q Anthropic-compatible server on http://127.0.0.1:${anthropicServerInstance!.port}`)
-            } catch (err: any) { void vscode.window.showErrorMessage(`Failed to start Anthropic server: ${err.message}`) }
+                void vscode.window.showInformationMessage(
+                    `Amazon Q Anthropic-compatible server on http://127.0.0.1:${anthropicServerInstance!.port}`
+                )
+            } catch (err: any) {
+                void vscode.window.showErrorMessage(`Failed to start Anthropic server: ${err.message}`)
+            }
         }),
 
         vscode.commands.registerCommand('aws.amazonq.anthropicServer.stop', async () => {
@@ -1465,55 +1912,97 @@ export function activateAnthropicServer(context: vscode.ExtensionContext) {
             )
 
             anthropicSettingsPanel.webview.html = buildAnthropicSettingsHtml(
-                anthropicSettingsPanel, running, currentPort, currentAutoStart,
-                currentDockerEnabled, currentDockerImage, currentMemoryMb,
-                currentRetry, currentRetryInterval
+                anthropicSettingsPanel,
+                running,
+                currentPort,
+                currentAutoStart,
+                currentDockerEnabled,
+                currentDockerImage,
+                currentMemoryMb,
+                currentRetry,
+                currentRetryInterval
             )
 
-            anthropicSettingsPanel.webview.onDidReceiveMessage(async (msg) => {
-                if (msg.command === 'start') {
-                    try {
-                        await anthropicServerInstance!.start()
-                        pushAnthropicSettingsState(true, anthropicServerInstance!.port)
-                        void vscode.window.showInformationMessage(`Anthropic server started on http://127.0.0.1:${anthropicServerInstance!.port}`)
-                    } catch (err: any) {
-                        void vscode.window.showErrorMessage(`Failed to start: ${err.message}`)
-                    }
-                } else if (msg.command === 'stop') {
-                    await anthropicServerInstance!.stop()
-                    pushAnthropicSettingsState(false, anthropicServerInstance!.port)
-                } else if (msg.command === 'save') {
-                    const newPort: number = msg.port
-                    const c = vscode.workspace.getConfiguration('amazonQ')
-                    await c.update('anthropicServer.port', newPort, vscode.ConfigurationTarget.Global)
-                    await c.update('anthropicServer.autoStart', msg.autoStart, vscode.ConfigurationTarget.Global)
-                    await c.update('anthropicServer.retryOnPortBusy', msg.retryOnPortBusy, vscode.ConfigurationTarget.Global)
-                    await c.update('anthropicServer.retryIntervalSeconds', msg.retryIntervalSeconds, vscode.ConfigurationTarget.Global)
-                    await c.update('anthropicServer.dockerEnabled', msg.dockerEnabled, vscode.ConfigurationTarget.Global)
-                    await c.update('anthropicServer.defaultEnvironmentImage', msg.dockerImage, vscode.ConfigurationTarget.Global)
-                    await c.update('anthropicServer.containerMemoryMb', msg.containerMemoryMb, vscode.ConfigurationTarget.Global)
-
-                    const wasRunning = anthropicServerInstance?.isRunning ?? false
-                    await anthropicServerInstance?.stop()
-                    anthropicServerInstance = new AnthropicCompatServer(newPort)
-
-                    if (wasRunning) {
+            anthropicSettingsPanel.webview.onDidReceiveMessage(
+                async (msg) => {
+                    if (msg.command === 'start') {
                         try {
-                            await anthropicServerInstance.start()
-                            pushAnthropicSettingsState(true, newPort)
-                            void vscode.window.showInformationMessage(`Settings saved. Anthropic server restarted on http://127.0.0.1:${newPort}`)
+                            await anthropicServerInstance!.start()
+                            pushAnthropicSettingsState(true, anthropicServerInstance!.port)
+                            void vscode.window.showInformationMessage(
+                                `Anthropic server started on http://127.0.0.1:${anthropicServerInstance!.port}`
+                            )
                         } catch (err: any) {
-                            pushAnthropicSettingsState(false, newPort)
-                            void vscode.window.showErrorMessage(`Settings saved, but failed to restart on port ${newPort}: ${err.message}`)
+                            void vscode.window.showErrorMessage(`Failed to start: ${err.message}`)
                         }
-                    } else {
-                        pushAnthropicSettingsState(false, newPort)
-                        void vscode.window.showInformationMessage(`Settings saved. Port set to ${newPort}.`)
-                    }
-                }
-            }, undefined, context.subscriptions)
+                    } else if (msg.command === 'stop') {
+                        await anthropicServerInstance!.stop()
+                        pushAnthropicSettingsState(false, anthropicServerInstance!.port)
+                    } else if (msg.command === 'save') {
+                        const newPort: number = msg.port
+                        const c = vscode.workspace.getConfiguration('amazonQ')
+                        await c.update('anthropicServer.port', newPort, vscode.ConfigurationTarget.Global)
+                        await c.update('anthropicServer.autoStart', msg.autoStart, vscode.ConfigurationTarget.Global)
+                        await c.update(
+                            'anthropicServer.retryOnPortBusy',
+                            msg.retryOnPortBusy,
+                            vscode.ConfigurationTarget.Global
+                        )
+                        await c.update(
+                            'anthropicServer.retryIntervalSeconds',
+                            msg.retryIntervalSeconds,
+                            vscode.ConfigurationTarget.Global
+                        )
+                        await c.update(
+                            'anthropicServer.dockerEnabled',
+                            msg.dockerEnabled,
+                            vscode.ConfigurationTarget.Global
+                        )
+                        await c.update(
+                            'anthropicServer.defaultEnvironmentImage',
+                            msg.dockerImage,
+                            vscode.ConfigurationTarget.Global
+                        )
+                        await c.update(
+                            'anthropicServer.containerMemoryMb',
+                            msg.containerMemoryMb,
+                            vscode.ConfigurationTarget.Global
+                        )
 
-            anthropicSettingsPanel.onDidDispose(() => { anthropicSettingsPanel = undefined }, undefined, context.subscriptions)
+                        const wasRunning = anthropicServerInstance?.isRunning ?? false
+                        await anthropicServerInstance?.stop()
+                        anthropicServerInstance = new AnthropicCompatServer(newPort)
+
+                        if (wasRunning) {
+                            try {
+                                await anthropicServerInstance.start()
+                                pushAnthropicSettingsState(true, newPort)
+                                void vscode.window.showInformationMessage(
+                                    `Settings saved. Anthropic server restarted on http://127.0.0.1:${newPort}`
+                                )
+                            } catch (err: any) {
+                                pushAnthropicSettingsState(false, newPort)
+                                void vscode.window.showErrorMessage(
+                                    `Settings saved, but failed to restart on port ${newPort}: ${err.message}`
+                                )
+                            }
+                        } else {
+                            pushAnthropicSettingsState(false, newPort)
+                            void vscode.window.showInformationMessage(`Settings saved. Port set to ${newPort}.`)
+                        }
+                    }
+                },
+                undefined,
+                context.subscriptions
+            )
+
+            anthropicSettingsPanel.onDidDispose(
+                () => {
+                    anthropicSettingsPanel = undefined
+                },
+                undefined,
+                context.subscriptions
+            )
         }),
 
         { dispose: () => anthropicServerInstance?.stop() }
