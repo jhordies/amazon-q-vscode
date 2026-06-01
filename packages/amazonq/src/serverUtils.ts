@@ -393,6 +393,7 @@ export function parseChunk(buffer: { value: string }): ParsedEvent[] {
         buffer.value = buffer.value.slice(end + 1)
         try {
             const data = JSON.parse(json)
+            log.debug('[parseChunk] event type=%s json=%s', eType, json.slice(0, 300))
             events.push({ type: eType, data })
         } catch { /* skip malformed */ }
     }
@@ -426,7 +427,26 @@ export async function streamFromCW(payload: any): Promise<http.IncomingMessage> 
         Authorization: `Bearer ${token}`,
         'x-amzn-codewhisperer-optout': 'false',
     }
-    return postStream(url, JSON.stringify(payload), headers)
+    const toolNames = payload?.conversationState?.currentMessage?.userInputMessage?.userInputMessageContext?.tools
+        ?.map((t: any) => t.toolSpecification?.name)
+    log.debug('[streamFromCW] POST %s tools=%s', url, JSON.stringify(toolNames))
+    const upstream = await postStream(url, JSON.stringify(payload), headers)
+    // Wrap the stream to log raw bytes for debugging tool input parsing
+    const origOn = (upstream as any).on.bind(upstream)
+    const rawChunks: string[] = []
+    ;(upstream as any).on = function(event: string, listener: (...args: any[]) => void) {
+        if (event === 'data') {
+            return origOn(event, (chunk: Buffer) => {
+                rawChunks.push(chunk.toString())
+                if (rawChunks.join('').length < 2000) {
+                    log.debug('[streamFromCW] raw chunk: %s', chunk.toString().slice(0, 500))
+                }
+                listener(chunk)
+            })
+        }
+        return origOn(event, listener)
+    }
+    return upstream
 }
 
 // ── Models helper ─────────────────────────────────────────────────────────────
