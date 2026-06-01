@@ -9,8 +9,7 @@
 
 const path = require('path')
 const webpack = require('webpack')
-// ESBuildMinifyPlugin is blocked by group policy on this machine — use TerserPlugin instead
-const TerserPlugin = require('terser-webpack-plugin')
+const { ESBuildMinifyPlugin } = require('esbuild-loader')
 const fs = require('fs')
 const { NLSBundlePlugin } = require('vscode-nls-dev/lib/webpack-bundler')
 const CircularDependencyPlugin = require('circular-dependency-plugin')
@@ -83,17 +82,11 @@ module.exports = (env = {}, argv = {}) => {
                         //     },
                         // },
                         {
-                            // esbuild-loader blocked by group policy — use ts-loader instead
-                            loader: 'ts-loader',
+                            // This transpiles our typescript to javascript.
+                            loader: 'esbuild-loader',
                             options: {
-                                transpileOnly: true,
-                                // Don't use tsconfig rootDir constraints — avoids TS6059 in vue bundles
-                                compilerOptions: {
-                                    rootDir: undefined,
-                                    composite: false,
-                                    declaration: false,
-                                    declarationMap: false,
-                                },
+                                loader: 'ts',
+                                target: 'es2021',
                             },
                         },
                     ],
@@ -121,8 +114,15 @@ module.exports = (env = {}, argv = {}) => {
         optimization: {
             minimize: !isDevelopment,
             minimizer: [
-                new TerserPlugin({
-                    terserOptions: { ecma: 2021 },
+                new ESBuildMinifyPlugin({
+                    target: 'es2021',
+                    // Are these enabled by default?
+                    // minify: true,
+                    // treeShaking: true,
+
+                    // De-duplicate license headers and list them at end of file.
+                    legalComments: 'eof',
+                    // sourcemap: 'external',
                 }),
             ],
         },
