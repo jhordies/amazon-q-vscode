@@ -249,7 +249,7 @@ export class OpenAICompatServer {
             res.setHeader('Access-Control-Expose-Headers', 'X-Session-Id')
             if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 
-            const url = req.url ?? ''
+            const url = (req.url ?? '').split('?')[0].replace(/\/+$/, '')
 
             if (url === '/v1/models' && req.method === 'GET') { await handleModels(res); return }
 
@@ -283,6 +283,7 @@ export class OpenAICompatServer {
                 return
             }
 
+            log.warn('OpenAI server 404: %s %s', req.method, req.url)
             res.writeHead(404, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ error: { message: 'Not found' } }))
         })

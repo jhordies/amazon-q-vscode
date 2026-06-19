@@ -191,12 +191,14 @@ export class GatewayStreamProcessor {
                         typeof event.data.input === 'object'
                             ? JSON.stringify(event.data.input)
                             : (event.data.input ?? ''),
+                    _blockIndex: state.toolCalls.length,
                 }
+                const toolRef = state.currentTool
                 if (event.data.stop) {
                     state.toolCalls.push(state.currentTool)
                     state.currentTool = null
                 }
-                return { type: 'tool', data: { action: 'start', tool: state.currentTool } }
+                return { type: 'tool', data: { action: 'start', tool: toolRef } }
             }
 
             case 'tool_input': {
