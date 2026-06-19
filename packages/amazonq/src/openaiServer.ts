@@ -228,6 +228,8 @@ async function handleModels(res: http.ServerResponse) {
 export class OpenAICompatServer {
     private server: http.Server | undefined
     private _port: number
+    /** Tracks all open sockets so we can forcibly destroy them on stop(). */
+    private _sockets = new Set<import('net').Socket>()
 
     constructor(port = 61822) { this._port = port }
     get port() { return this._port }
@@ -243,6 +245,11 @@ export class OpenAICompatServer {
         // then pass the `if (this.server) return` guard, create a new server, and
         // immediately hit EADDRINUSE even though the port looks free to the user.
         const srv = http.createServer(async (req, res) => {
+            // Disable keep-alive so clients release connections promptly.
+            // This is critical for code-server where browser clients otherwise
+            // hold keep-alive connections open indefinitely, preventing the port
+            // from being released when the extension is deactivated/reloaded.
+            res.setHeader('Connection', 'close')
             res.setHeader('Access-Control-Allow-Origin', '*')
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
             res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-Id')
@@ -288,6 +295,12 @@ export class OpenAICompatServer {
             res.end(JSON.stringify({ error: { message: 'Not found' } }))
         })
 
+        // Track every socket so stop() can forcibly destroy them.
+        srv.on('connection', (socket) => {
+            this._sockets.add(socket)
+            socket.once('close', () => this._sockets.delete(socket))
+        })
+
         return new Promise((resolve, reject) => {
             srv.listen(this._port, '127.0.0.1', () => {
                 this.server = srv  // assign only after successful bind
@@ -309,7 +322,28 @@ export class OpenAICompatServer {
     stop(): Promise<void> {
         return new Promise((resolve) => {
             if (!this.server) { resolve(); return }
-            this.server.close(() => { this.server = undefined; log.info('OpenAI-compatible server stopped'); resolve() })
+            const srv = this.server
+            this.server = undefined
+
+            // Forcibly destroy all tracked sockets so keep-alive connections
+            // (common in code-server / browser clients) don't hold the port open.
+            for (const socket of this._sockets) {
+                socket.destroy()
+            }
+            this._sockets.clear()
+
+            // Give server.close() up to 2 s to finish, then force-resolve.
+            // This prevents the extension from hanging on deactivation.
+            const timeout = setTimeout(() => {
+                log.warn('OpenAI-compatible server did not close cleanly within 2s — forcing shutdown')
+                resolve()
+            }, 2000)
+
+            srv.close(() => {
+                clearTimeout(timeout)
+                log.info('OpenAI-compatible server stopped')
+                resolve()
+            })
         })
     }
 }

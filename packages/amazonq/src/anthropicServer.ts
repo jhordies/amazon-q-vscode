@@ -1382,6 +1382,8 @@ export class AnthropicCompatServer {
     private server: http.Server | undefined
     private _port: number
     private _retryTimer: ReturnType<typeof setTimeout> | undefined
+    /** Tracks all open sockets so we can forcibly destroy them on stop(). */
+    private _sockets = new Set<import('net').Socket>()
 
     constructor(port = 61823) {
         this._port = port
@@ -1408,6 +1410,11 @@ export class AnthropicCompatServer {
         this.cancelRetry()
 
         const srv = http.createServer(async (req, res) => {
+            // Disable keep-alive so clients release connections promptly.
+            // This is critical for code-server where browser clients otherwise
+            // hold keep-alive connections open indefinitely, preventing the port
+            // from being released when the extension is deactivated/reloaded.
+            res.setHeader('Connection', 'close')
             res.setHeader('Access-Control-Allow-Origin', '*')
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
             res.setHeader(
@@ -1578,6 +1585,12 @@ export class AnthropicCompatServer {
             }
         })
 
+        // Track every socket so stop() can forcibly destroy them.
+        srv.on('connection', (socket) => {
+            this._sockets.add(socket)
+            socket.once('close', () => this._sockets.delete(socket))
+        })
+
         return new Promise((resolve, reject) => {
             srv.listen(this._port, '127.0.0.1', () => {
                 this.server = srv
@@ -1636,14 +1649,32 @@ export class AnthropicCompatServer {
                 resolve()
                 return
             }
+            const srv = this.server
+            this.server = undefined
+
             // Stop all active Docker sessions
             for (const session of sessionMap.values()) {
                 if (session.container_id) {
                     void stopContainer(session.container_id)
                 }
             }
-            this.server.close(() => {
-                this.server = undefined
+
+            // Forcibly destroy all tracked sockets so keep-alive connections
+            // (common in code-server / browser clients) don't hold the port open.
+            for (const socket of this._sockets) {
+                socket.destroy()
+            }
+            this._sockets.clear()
+
+            // Give server.close() up to 2 s to finish, then force-resolve.
+            // This prevents the extension from hanging on deactivation.
+            const timeout = setTimeout(() => {
+                log.warn('Anthropic-compatible server did not close cleanly within 2s — forcing shutdown')
+                resolve()
+            }, 2000)
+
+            srv.close(() => {
+                clearTimeout(timeout)
                 log.info('Anthropic-compatible server stopped')
                 resolve()
             })
