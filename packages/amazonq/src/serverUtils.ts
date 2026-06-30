@@ -287,16 +287,20 @@ export function buildKiroPayload(req: OpenAIChatRequest, conversationId: string,
         }
     }
 
+    const hasTools = !!(req.tools?.length)
+
     const history: any[] = historyMsgs.map((m) => {
         if (m.role === 'user') {
             const ui: any = { content: m.content || '(empty)', modelId, origin: 'AI_EDITOR' }
-            if (m.toolResults?.length) {
+            // Only include toolResults in history when tools are defined (Bedrock TOOL_CONFIG_MISSING)
+            if (m.toolResults?.length && hasTools) {
                 ui.userInputMessageContext = { toolResults: m.toolResults }
             }
             return { userInputMessage: ui }
         }
         const ar: any = { content: m.content || '(empty)' }
-        if (m.toolCalls?.length) ar.toolUses = m.toolCalls
+        // Only include toolUses in history when tools are defined (Bedrock TOOL_CONFIG_MISSING)
+        if (m.toolCalls?.length && hasTools) ar.toolUses = m.toolCalls
         return { assistantResponseMessage: ar }
     })
 
@@ -321,7 +325,11 @@ export function buildKiroPayload(req: OpenAIChatRequest, conversationId: string,
             }))
     }
 
-    if (current.toolResults?.length) {
+    // Only include toolResults when tools are also defined — Bedrock requires
+    // toolConfig (ctx.tools) whenever toolResults or toolUses are present.
+    // If we have tool results but no tools defined, skip them to avoid the
+    // "TOOL_CONFIG_MISSING" Bedrock error.
+    if (current.toolResults?.length && ctx.tools?.length) {
         ctx.toolResults = current.toolResults
     }
 
