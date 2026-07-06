@@ -546,6 +546,17 @@ async function handleMessages(
         return
     }
 
+    // Local token estimation fallback — upstream always returns 0
+    if (promptTokens === 0) {
+        const inputChars = JSON.stringify(openaiMessages).length + (systemPrompt?.length ?? 0)
+        promptTokens = Math.ceil(inputChars / 4)
+    }
+    if (completionTokens === 0) {
+        const outputChars =
+            fullContent.length + toolCalls.reduce((s, tc) => s + JSON.stringify(tc.input).length, 0)
+        completionTokens = Math.ceil(outputChars / 4)
+    }
+
     // Persist assistant turn
     const assistantMsg: OpenAIMessage = { role: 'assistant', content: fullContent || null }
     if (toolCalls.length) {
