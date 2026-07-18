@@ -244,6 +244,12 @@
                     "default": true,
                     "scope": "application"
                 },
+                "amazonQ.anthropicServer.killStaleProcess": {
+                    "type": "boolean",
+                    "description": "When the port is busy but the existing server is not responding, kill the stale process and reclaim the port. Safe for multi-instance: a healthy server will never be killed.",
+                    "default": true,
+                    "scope": "application"
+                },
                 "amazonQ.anthropicServer.retryIntervalSeconds": {
                     "type": "number",
                     "description": "How many seconds to wait between port-busy retries for the Anthropic server.",
