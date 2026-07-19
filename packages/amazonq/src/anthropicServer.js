@@ -1155,9 +1155,12 @@ async function handleSessions(method, pathParts, body, req, res) {
 }
 // ── Main HTTP server class ────────────────────────────────────────────────────
 class AnthropicCompatServer {
-    constructor(port = 61823) { this._port = port; }
+    constructor(port = 61823) {
+        this._port = port;
+        this._reusingExternalInstance = false;
+    }
     get port() { return this._port; }
-    get isRunning() { return !!this.server; }
+    get isRunning() { return !!this.server || this._reusingExternalInstance; }
     /** Cancel any pending port-retry timer without stopping the server. */
     cancelRetry() {
         if (this._retryTimer) {
@@ -1165,9 +1168,100 @@ class AnthropicCompatServer {
             this._retryTimer = undefined;
         }
     }
+    /**
+     * Check whether an existing server on our port is healthy (responding to requests).
+     * Returns true if the server responds within the timeout, false otherwise.
+     */
+    async isPortHealthy(timeoutMs = 2000) {
+        return new Promise((resolve) => {
+            const req = http.get(
+                `http://127.0.0.1:${this._port}/v1/models`,
+                { timeout: timeoutMs },
+                (res) => {
+                    res.resume();
+                    resolve(true);
+                }
+            );
+            req.on('error', () => resolve(false));
+            req.on('timeout', () => {
+                req.destroy();
+                resolve(false);
+            });
+        });
+    }
+    /**
+     * Attempt to kill a stale/frozen process holding our port.
+     * Uses platform-appropriate commands. Returns true if kill was attempted.
+     */
+    async killStalePortProcess() {
+        const platform = process.platform;
+        try {
+            if (platform === 'win32') {
+                const { stdout } = await execFileAsync('cmd', [
+                    '/c',
+                    `netstat -ano | findstr "LISTENING" | findstr ":${this._port} "`,
+                ]);
+                const lines = stdout.trim().split(/\r?\n/);
+                const pids = new Set();
+                for (const line of lines) {
+                    const parts = line.trim().split(/\s+/);
+                    const pid = parts[parts.length - 1];
+                    if (pid && /^\d+$/.test(pid) && pid !== '0') {
+                        pids.add(pid);
+                    }
+                }
+                for (const pid of pids) {
+                    serverUtils_1.log.warn('Killing stale process PID %s holding port %d', pid, this._port);
+                    await execFileAsync('taskkill', ['/F', '/PID', pid]).catch(() => { });
+                }
+                return pids.size > 0;
+            }
+            else {
+                serverUtils_1.log.warn('Killing stale process holding port %d via fuser', this._port);
+                await execFileAsync('fuser', ['-k', `${this._port}/tcp`]).catch(() => { });
+                return true;
+            }
+        }
+        catch (err) {
+            serverUtils_1.log.warn('Failed to kill stale process on port %d: %s', this._port, err.message);
+            return false;
+        }
+    }
+    /**
+     * Handle EADDRINUSE by checking if the existing server is healthy.
+     * If healthy: reuse it (don't start a new one).
+     * If stale/frozen: kill it and retry.
+     * Returns 'reused' if a healthy server exists, 'killed' if we killed a stale process,
+     * or 'skipped' if kill is disabled.
+     */
+    async handlePortInUse() {
+        const cfg = vscode.workspace.getConfiguration('amazonQ');
+        const killEnabled = cfg.get('anthropicServer.killStaleProcess', true);
+        const healthy = await this.isPortHealthy();
+        if (healthy) {
+            serverUtils_1.log.info('Anthropic server: port %d is in use by a healthy server — reusing existing instance', this._port);
+            return 'reused';
+        }
+        if (!killEnabled) {
+            serverUtils_1.log.warn('Anthropic server: port %d is held by a non-responsive process but killStaleProcess is disabled', this._port);
+            return 'skipped';
+        }
+        const killed = await this.killStalePortProcess();
+        if (killed) {
+            await new Promise((r) => setTimeout(r, 600));
+        }
+        return 'killed';
+    }
     async start() {
         if (this.server)
             return;
+        // If we were reusing an external instance, check if it's still healthy
+        if (this._reusingExternalInstance) {
+            const stillHealthy = await this.isPortHealthy();
+            if (stillHealthy)
+                return;
+            this._reusingExternalInstance = false;
+        }
         this.cancelRetry();
         const srv = http.createServer(async (req, res) => {
             res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1340,32 +1434,52 @@ class AnthropicCompatServer {
             });
             srv.on('error', (err) => {
                 if (err.code === 'EADDRINUSE') {
-                    const cfg = vscode.workspace.getConfiguration('amazonQ');
-                    const retryEnabled = cfg.get('anthropicServer.retryOnPortBusy', true);
-                    const retryIntervalSec = Math.max(1, cfg.get('anthropicServer.retryIntervalSeconds', 5));
-                    if (retryEnabled) {
-                        serverUtils_1.log.warn('Anthropic server: port %d busy — will retry in %ds', this._port, retryIntervalSec);
-                        pushAnthropicSettingsState(false, this._port);
-                        void vscode.window.showWarningMessage(`Anthropic server: port ${this._port} is busy. Retrying in ${retryIntervalSec}s…`, 'Stop retrying').then((choice) => {
-                            if (choice === 'Stop retrying')
-                                this.cancelRetry();
-                        });
-                        this._retryTimer = setTimeout(() => {
-                            this._retryTimer = undefined;
+                    // Attempt health-check + kill-stale-process before falling back to blind retry
+                    void this.handlePortInUse().then((result) => {
+                        if (result === 'reused') {
+                            serverUtils_1.log.info('Anthropic server: reusing healthy instance on port %d', this._port);
+                            this._reusingExternalInstance = true;
+                            resolve();
+                            return;
+                        }
+                        if (result === 'killed') {
+                            serverUtils_1.log.info('Anthropic server: killed stale process, retrying start on port %d', this._port);
                             this.start().then(() => {
                                 pushAnthropicSettingsState(true, this._port);
+                                resolve();
                             }).catch((e) => {
-                                serverUtils_1.log.error('Anthropic server retry failed: %s', e);
+                                serverUtils_1.log.error('Anthropic server: retry after kill failed: %s', e);
+                                reject(e);
                             });
-                        }, retryIntervalSec * 1000);
-                        // Resolve (not reject) so the caller doesn't see an error — retrying silently
-                        resolve();
-                    }
-                    else {
-                        const detail = `Port ${this._port} is already in use. Change the port in Amazon Q settings (amazonQ.anthropicServer.port) or enable retryOnPortBusy.`;
-                        serverUtils_1.log.error('Anthropic-compatible server failed to start: %s', detail);
-                        reject(new Error(detail));
-                    }
+                            return;
+                        }
+                        // result === 'skipped' — killStaleProcess is disabled, fall back to existing retry logic
+                        const cfg = vscode.workspace.getConfiguration('amazonQ');
+                        const retryEnabled = cfg.get('anthropicServer.retryOnPortBusy', true);
+                        const retryIntervalSec = Math.max(1, cfg.get('anthropicServer.retryIntervalSeconds', 5));
+                        if (retryEnabled) {
+                            serverUtils_1.log.warn('Anthropic server: port %d busy — will retry in %ds', this._port, retryIntervalSec);
+                            pushAnthropicSettingsState(false, this._port);
+                            void vscode.window.showWarningMessage(`Anthropic server: port ${this._port} is busy. Retrying in ${retryIntervalSec}s…`, 'Stop retrying').then((choice) => {
+                                if (choice === 'Stop retrying')
+                                    this.cancelRetry();
+                            });
+                            this._retryTimer = setTimeout(() => {
+                                this._retryTimer = undefined;
+                                this.start().then(() => {
+                                    pushAnthropicSettingsState(true, this._port);
+                                }).catch((e) => {
+                                    serverUtils_1.log.error('Anthropic server retry failed: %s', e);
+                                });
+                            }, retryIntervalSec * 1000);
+                            resolve();
+                        }
+                        else {
+                            const detail = `Port ${this._port} is already in use. Change the port in Amazon Q settings (amazonQ.anthropicServer.port) or enable retryOnPortBusy.`;
+                            serverUtils_1.log.error('Anthropic-compatible server failed to start: %s', detail);
+                            reject(new Error(detail));
+                        }
+                    });
                 }
                 else {
                     const detail = `${err.message} (code: ${err.code ?? 'unknown'})`;
@@ -1377,6 +1491,7 @@ class AnthropicCompatServer {
     }
     stop() {
         this.cancelRetry();
+        this._reusingExternalInstance = false;
         return new Promise((resolve) => {
             if (!this.server) {
                 resolve();

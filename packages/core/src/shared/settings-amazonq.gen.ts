@@ -41,6 +41,7 @@ export const amazonqSettings = {
     "amazonQ.anthropicServer.port": {},
     "amazonQ.anthropicServer.autoStart": {},
     "amazonQ.anthropicServer.retryOnPortBusy": {},
+    "amazonQ.anthropicServer.killStaleProcess": {},
     "amazonQ.anthropicServer.retryIntervalSeconds": {},
     "amazonQ.anthropicServer.dockerEnabled": {},
     "amazonQ.anthropicServer.defaultEnvironmentImage": {},
