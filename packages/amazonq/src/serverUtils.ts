@@ -212,6 +212,30 @@ export function sanitizeSchema(schema: any): any {
 
 // ── Payload builder (OpenAI → Kiro/CW format) ───────────────────────────────
 
+/**
+ * Collapse tool blocks that share the same `toolUseId` down to a single entry.
+ *
+ * Bedrock rejects any message whose content contains two `toolUse` (or
+ * `toolResult`) blocks with the same id — e.g. "The toolUse blocks at
+ * messages.2.content contain duplicate Ids". Duplicates can slip in when a
+ * streamed assistant turn is persisted to the session store and the client
+ * also resends it, so the merge-adjacent step concatenates the same tool call
+ * twice. Keeping the first occurrence of each id is sufficient and safe:
+ * duplicates are always identical, since they originate from the same turn.
+ */
+export function dedupeByToolUseId<T extends { toolUseId?: string }>(items: T[]): T[] {
+    const seen = new Set<string>()
+    const out: T[] = []
+    for (const item of items) {
+        const id = item.toolUseId ?? ''
+        // Entries without an id can't collide meaningfully — keep them all.
+        if (id && seen.has(id)) continue
+        if (id) seen.add(id)
+        out.push(item)
+    }
+    return out
+}
+
 export function buildKiroPayload(req: OpenAIChatRequest, conversationId: string, profileArn?: string) {
     let systemPrompt = ''
     const unified: { role: string; content: string; toolCalls?: any[]; toolResults?: any[] }[] = []
@@ -294,13 +318,13 @@ export function buildKiroPayload(req: OpenAIChatRequest, conversationId: string,
             const ui: any = { content: m.content || '(empty)', modelId, origin: 'AI_EDITOR' }
             // Only include toolResults in history when tools are defined (Bedrock TOOL_CONFIG_MISSING)
             if (m.toolResults?.length && hasTools) {
-                ui.userInputMessageContext = { toolResults: m.toolResults }
+                ui.userInputMessageContext = { toolResults: dedupeByToolUseId(m.toolResults) }
             }
             return { userInputMessage: ui }
         }
         const ar: any = { content: m.content || '(empty)' }
         // Only include toolUses in history when tools are defined (Bedrock TOOL_CONFIG_MISSING)
-        if (m.toolCalls?.length && hasTools) ar.toolUses = m.toolCalls
+        if (m.toolCalls?.length && hasTools) ar.toolUses = dedupeByToolUseId(m.toolCalls)
         return { assistantResponseMessage: ar }
     })
 
@@ -330,7 +354,7 @@ export function buildKiroPayload(req: OpenAIChatRequest, conversationId: string,
     // If we have tool results but no tools defined, skip them to avoid the
     // "TOOL_CONFIG_MISSING" Bedrock error.
     if (current.toolResults?.length && ctx.tools?.length) {
-        ctx.toolResults = current.toolResults
+        ctx.toolResults = dedupeByToolUseId(current.toolResults)
     }
 
     if (Object.keys(ctx).length) userInput.userInputMessageContext = ctx

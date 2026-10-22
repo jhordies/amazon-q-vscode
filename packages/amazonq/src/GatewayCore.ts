@@ -178,6 +178,30 @@ export class GatewayStreamProcessor {
             }
 
             case 'tool_start': {
+                // Dedup: the raw parseChunk stream signals completion with a
+                // SECOND tool_start carrying stop:true and the SAME toolUseId
+                // as the tool already in progress. Finalize the current tool
+                // instead of starting a new one — otherwise the same id is
+                // pushed twice and leaks into the SSE stream the client sends
+                // back, triggering Bedrock "duplicate Ids".
+                {
+                    const incomingId = event.data.toolUseId
+                    if (incomingId && state.currentTool && state.currentTool.id === incomingId) {
+                        if (event.data.stop) {
+                            if (typeof event.data.input === 'object') {
+                                Object.assign(state.currentTool.input, event.data.input)
+                                state.currentTool._rawArgs = JSON.stringify(state.currentTool.input)
+                            }
+                            state.toolCalls.push(state.currentTool)
+                            const finishedTool = state.currentTool
+                            state.currentTool = null
+                            return { type: 'tool', data: { action: 'stop', tool: finishedTool } }
+                        }
+                        // Duplicate start for the same tool without stop — ignore.
+                        return null
+                    }
+                }
+
                 if (state.currentTool) {
                     state.toolCalls.push(state.currentTool)
                 }

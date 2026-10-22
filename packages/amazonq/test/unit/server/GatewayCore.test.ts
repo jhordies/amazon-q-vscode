@@ -284,6 +284,34 @@ describe('GatewayStreamProcessor', () => {
             assert.deepStrictEqual(state.toolCalls[0].input, { query: 'test' })
         })
 
+        it('does not duplicate a tool when stop arrives as a second tool_start (raw stream)', () => {
+            // Reproduces the raw parseChunk stream seen in logs: an initial
+            // tool_start (no stop), partial tool_input deltas, then a SECOND
+            // tool_start carrying stop:true with the SAME toolUseId. The old
+            // code pushed that id twice → Bedrock "duplicate Ids".
+            const id = 'tooluse_9FFCuCnUmu6YDFMNUVM6g3'
+            GatewayStreamProcessor.processEvent(
+                { type: 'tool_start', data: { toolUseId: id, name: 'powershell', input: '' } },
+                state
+            )
+            GatewayStreamProcessor.processEvent({ type: 'tool_input', data: { input: '{"command":' } }, state)
+            GatewayStreamProcessor.processEvent({ type: 'tool_input', data: { input: '"Get-Date"}' } }, state)
+            const result = GatewayStreamProcessor.processEvent(
+                { type: 'tool_start', data: { toolUseId: id, name: 'powershell', stop: true } },
+                state
+            )
+            assert.ok(result)
+            assert.strictEqual(result.data.action, 'stop')
+            assert.strictEqual(state.currentTool, null)
+            assert.strictEqual(state.toolCalls.length, 1)
+            assert.strictEqual(state.toolCalls[0].id, id)
+
+            // finalizeToolCalls must also keep exactly one entry for this id.
+            const finalized = GatewayStreamProcessor.finalizeToolCalls(state)
+            assert.strictEqual(finalized.filter((t) => t.id === id).length, 1)
+        })
+
+
         it('handles usage event and updates token counts', () => {
             const ev: ParsedEvent = {
                 type: 'usage',
